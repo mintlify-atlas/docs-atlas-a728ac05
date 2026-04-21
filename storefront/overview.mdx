@@ -1,0 +1,129 @@
+---
+title: "Shopware Storefront: Twig and Bootstrap 5 frontend"
+description: "The Shopware Storefront is a server-rendered Twig frontend on Bootstrap 5 and Webpack, following a Controller → PageLoader → Template flow with a composable theme system."
+---
+
+The Shopware Storefront is the built-in customer-facing frontend for Shopware 6. It is a server-side rendered application powered by Twig templates, Bootstrap 5 for styling, and Webpack 5 for asset bundling. Rather than a headless SPA, the Storefront follows a classic MVC-style flow: a Symfony controller loads a **Page** struct via a dedicated **PageLoader**, then renders a Twig template and returns HTML. This architecture makes the Storefront straightforward to extend without touching core files.
+
+## Module structure
+
+The `src/Storefront/` directory is organized into purpose-specific sub-modules:
+
+| Directory | Purpose |
+|---|---|
+| `Controller/` | Symfony controllers handling HTTP routes (one per feature area) |
+| `Page/` | Page structs and PageLoader classes that populate them |
+| `Pagelet/` | Partial-page structs (header, footer, offcanvas menu) loaded via ESI |
+| `Theme/` | Theme compilation, SCSS processing, and theme entity management |
+| `Framework/` | Routing, Twig extensions, caching, cookies, SEO utilities |
+| `Event/` | Storefront-specific events (`StorefrontRenderEvent`, `StorefrontRedirectEvent`) |
+| `Resources/views/` | Core Twig templates organized under `storefront/` |
+| `Resources/app/storefront/` | JavaScript plugins and SCSS source files |
+
+## Technology stack
+
+The Storefront combines three frontend technologies:
+
+<CardGroup cols={3}>
+  <Card title="Twig" icon="file-code">
+    Server-side template engine with block-based inheritance. All HTML is rendered in PHP before being sent to the browser.
+  </Card>
+  <Card title="Bootstrap 5" icon="grid">
+    CSS framework providing the responsive grid, utility classes, and component styles used across all core templates.
+  </Card>
+  <Card title="Webpack 5" icon="box">
+    Bundles JavaScript plugins and compiles SCSS theme files. Theme configuration drives variable injection at build time.
+  </Card>
+</CardGroup>
+
+## Controller → Page → Template flow
+
+Every Storefront page follows the same three-step pattern:
+
+<Steps>
+  <Step title="Controller receives the request">
+    A controller extending `StorefrontController` (itself extending Symfony's `AbstractController`) is matched by the Symfony router. All controllers are annotated with `#[Route]` and scoped to `StorefrontRouteScope`. The controller delegates data loading entirely to a **PageLoader** — it never calls repositories directly.
+
+    ```php
+    // src/Storefront/Controller/NavigationController.php
+    #[Route(path: '/', name: 'frontend.home.page', methods: ['GET'])]
+    public function home(Request $request, SalesChannelContext $context): Response
+    {
+        $page = $this->navigationPageLoader->load($request, $context);
+        $this->hook(new NavigationPageLoadedHook($page, $context));
+
+        return $this->renderStorefront(
+            '@Storefront/storefront/page/content/index.html.twig',
+            ['page' => $page]
+        );
+    }
+    ```
+  </Step>
+
+  <Step title="PageLoader assembles the Page struct">
+    The **PageLoader** calls Store API routes (never DAL repositories directly), assembles a typed `Page` struct that extends `Shopware\Storefront\Page\Page`, and dispatches a `PageLoadedEvent`. Subscribers can listen to this event to inject additional data into the page.
+
+    ```php
+    // src/Storefront/Page/Navigation/NavigationPageLoader.php
+    public function load(Request $request, SalesChannelContext $context): NavigationPage
+    {
+        $page = $this->genericLoader->load($request, $context);
+        $page = NavigationPage::createFrom($page);
+
+        // ... populate $page from Store API routes ...
+
+        $this->eventDispatcher->dispatch(
+            new NavigationPageLoadedEvent($page, $context, $request)
+        );
+
+        return $page;
+    }
+    ```
+  </Step>
+
+  <Step title="Twig template renders the response">
+    The controller calls `$this->renderStorefront($template, ['page' => $page])`. This dispatches a `StorefrontRenderEvent` (allowing parameter injection), then renders the Twig template through `TemplateFinder` (which resolves plugin/theme overrides), replaces SEO URL and media URL placeholders, and returns an HTTP response.
+  </Step>
+</Steps>
+
+## Page/Pagelet pattern
+
+Shopware distinguishes between **Pages** and **Pagelets**:
+
+- **Page** — a full page struct (`Page` base class). Every page carries a `MetaInformation` struct (title, description, canonical URL) populated by its loader.
+- **Pagelet** — a partial page component loaded independently (e.g., `HeaderPagelet`, `FooterPagelet`, `MenuOffcanvasPagelet`). Pagelets are rendered via Edge Side Includes (ESI) so they can be cached independently from the main page content.
+
+## Theme system
+
+The Theme module (`src/Storefront/Theme/`) manages everything from SCSS compilation to per-sales-channel theme assignment:
+
+- **`ThemeCompiler`** — compiles SCSS using `ScssPhpCompiler`, resolves `@import` paths across plugins and parent themes, and writes the final CSS to the public assets directory.
+- **`ThemeService`** — activates themes, assigns them to sales channels, and triggers recompilation.
+- **`ThemeFileResolver`** — merges file lists from a theme and all its inherited parent themes.
+- **`StorefrontPluginRegistry`** — discovers all Storefront plugins and themes registered via `theme.json` or `ThemeInterface`.
+- **`ThemeConfigValueAccessor`** — makes theme configuration values accessible inside Twig via the `theme_config()` function.
+
+## Built-in routes
+
+The Storefront exposes routes for all standard e-commerce flows. Key route name prefixes:
+
+| Prefix | Area |
+|---|---|
+| `frontend.home.*` | Home page and navigation |
+| `frontend.detail.*` | Product detail pages |
+| `frontend.checkout.*` | Cart and checkout |
+| `frontend.account.*` | Customer account (orders, profile, addresses) |
+| `frontend.search.*` | Search and suggest |
+| `frontend.navigation.*` | Category navigation pages |
+| `frontend.cms.*` | CMS shopping experiences |
+
+## Learn more
+
+<CardGroup cols={2}>
+  <Card title="Customize Twig templates" href="/storefront/twig-templates">
+    Override core Twig blocks without modifying Shopware source files using `sw_extends` and block inheritance.
+  </Card>
+  <Card title="Add custom pages" href="/storefront/custom-pages">
+    Create a new StorefrontController, Page struct, PageLoader, and Twig template to add entirely new routes.
+  </Card>
+</CardGroup>

@@ -1,0 +1,294 @@
+---
+title: "Admin API: manage customers and accounts"
+description: "Use the Shopware Admin API to list, create, update, and delete customer accounts, manage addresses, and work with customer groups and segmentation."
+---
+
+The customer endpoints provide full CRUD access to customer accounts. You can manage personal data, addresses, group memberships, and account status. All requests require a Bearer token from `/api/oauth/token`.
+
+## List customers
+
+<CodeGroup>
+
+```bash GET /api/customer
+curl -X POST https://your-shop.example.com/api/search/customer \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 25,
+    "page": 1,
+    "sort": [{ "field": "lastName", "order": "ASC" }],
+    "associations": {
+      "group": {},
+      "defaultBillingAddress": {},
+      "defaultShippingAddress": {}
+    }
+  }'
+```
+
+</CodeGroup>
+
+<ResponseField name="total" type="integer">
+  Total number of customers matching the criteria.
+</ResponseField>
+
+<ResponseField name="data" type="Customer[]">
+  Array of customer objects.
+
+  <ResponseField name="id" type="string (uuid)">
+    Unique identifier of the customer.
+  </ResponseField>
+
+  <ResponseField name="customerNumber" type="string">
+    Unique customer number assigned at registration.
+  </ResponseField>
+
+  <ResponseField name="firstName" type="string">
+    Customer's first name.
+  </ResponseField>
+
+  <ResponseField name="lastName" type="string">
+    Customer's last name.
+  </ResponseField>
+
+  <ResponseField name="email" type="string">
+    Customer's email address. Used for login.
+  </ResponseField>
+
+  <ResponseField name="active" type="boolean">
+    Whether the account is enabled for login.
+  </ResponseField>
+
+  <ResponseField name="guest" type="boolean">
+    `true` for guest checkout accounts without a persistent login.
+  </ResponseField>
+
+  <ResponseField name="accountType" type="string">
+    `private` or `business`.
+  </ResponseField>
+
+  <ResponseField name="orderCount" type="integer">
+    Total number of orders placed by this customer (read-only).
+  </ResponseField>
+
+  <ResponseField name="orderTotalAmount" type="number">
+    Lifetime order total (read-only).
+  </ResponseField>
+</ResponseField>
+
+---
+
+## Get a customer
+
+<CodeGroup>
+
+```bash GET /api/customer/{id}
+curl "https://your-shop.example.com/api/customer/{id}?associations[addresses][]=&associations[group][]=&associations[tags][]=" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+</CodeGroup>
+
+---
+
+## Create a customer
+
+<CodeGroup>
+
+```bash POST /api/customer
+curl -X POST https://your-shop.example.com/api/customer \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "salesChannelId": "98432def39fc4624b33213a56b8c944d",
+    "groupId": "cfbd5018d38d41d8adca10d94fc8bdd6",
+    "languageId": "2fbb5fe2e29a4d70aa5854ce7ce3e20b",
+    "customerNumber": "C-10042",
+    "firstName": "Ada",
+    "lastName": "Lovelace",
+    "email": "ada@example.com",
+    "password": "SecurePass123!",
+    "accountType": "private",
+    "defaultBillingAddress": {
+      "firstName": "Ada",
+      "lastName": "Lovelace",
+      "street": "Marienplatz 1",
+      "zipcode": "80331",
+      "city": "Munich",
+      "countryId": "de6e9a235c144b5a94d2cebcbc541bfb"
+    },
+    "defaultShippingAddress": {
+      "firstName": "Ada",
+      "lastName": "Lovelace",
+      "street": "Marienplatz 1",
+      "zipcode": "80331",
+      "city": "Munich",
+      "countryId": "de6e9a235c144b5a94d2cebcbc541bfb"
+    }
+  }'
+```
+
+</CodeGroup>
+
+### Required fields
+
+<ParamField body="salesChannelId" type="string (uuid)" required>
+  The sales channel this customer belongs to.
+</ParamField>
+
+<ParamField body="groupId" type="string (uuid)" required>
+  Customer group ID. Determines pricing rules and permissions. Retrieve groups via `GET /api/customer-group`.
+</ParamField>
+
+<ParamField body="languageId" type="string (uuid)" required>
+  Language preference for transactional emails and the storefront.
+</ParamField>
+
+<ParamField body="customerNumber" type="string" required>
+  Unique identifier for the customer. Must be unique across all customers.
+</ParamField>
+
+<ParamField body="firstName" type="string" required>
+  Customer's first name. Maximum 255 characters.
+</ParamField>
+
+<ParamField body="lastName" type="string" required>
+  Customer's last name. Maximum 255 characters.
+</ParamField>
+
+<ParamField body="email" type="string" required>
+  Customer's email address. Must be unique within the sales channel.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Account password. Not returned in any GET response.
+</ParamField>
+
+<ParamField body="defaultBillingAddress" type="object" required>
+  Inline address object created alongside the customer. Required fields: `firstName`, `lastName`, `street`, `zipcode`, `city`, `countryId`.
+</ParamField>
+
+<ParamField body="defaultShippingAddress" type="object" required>
+  Inline shipping address. Accepts the same fields as `defaultBillingAddress`. Can reference the billing address ID after creation.
+</ParamField>
+
+### Optional fields
+
+<ParamField body="salutationId" type="string (uuid)">
+  Salutation (e.g. Mr., Mrs.). Retrieve options via `GET /api/salutation`.
+</ParamField>
+
+<ParamField body="title" type="string">
+  Honorific title. Maximum 100 characters.
+</ParamField>
+
+<ParamField body="company" type="string">
+  Company name, relevant when `accountType` is `business`.
+</ParamField>
+
+<ParamField body="birthday" type="string (YYYY-MM-DD)">
+  Customer's date of birth.
+</ParamField>
+
+<ParamField body="active" type="boolean" default="true">
+  Set to `false` to disable the account without deleting it.
+</ParamField>
+
+<ParamField body="affiliateCode" type="string">
+  Affiliate tracking code attributed to this customer's acquisition.
+</ParamField>
+
+<ParamField body="campaignCode" type="string">
+  Campaign tracking code attributed to this customer's acquisition.
+</ParamField>
+
+---
+
+## Update a customer
+
+Send only the fields you want to change.
+
+<CodeGroup>
+
+```bash PATCH /api/customer/{id}
+curl -X PATCH https://your-shop.example.com/api/customer/{id} \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "active": false,
+    "groupId": "new-group-uuid-here"
+  }'
+```
+
+</CodeGroup>
+
+---
+
+## Customer addresses
+
+Each customer can have multiple saved addresses. The `defaultBillingAddressId` and `defaultShippingAddressId` fields on the customer record point to the active defaults.
+
+### List addresses
+
+```bash
+curl https://your-shop.example.com/api/customer/{customerId}/address \
+  -H "Authorization: Bearer <access_token>"
+```
+
+### Add an address
+
+<CodeGroup>
+
+```bash POST /api/customer/{customerId}/address
+curl -X POST https://your-shop.example.com/api/customer/{customerId}/address \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "firstName": "Ada",
+    "lastName": "Lovelace",
+    "street": "Leopoldstrasse 12",
+    "zipcode": "80802",
+    "city": "Munich",
+    "countryId": "de6e9a235c144b5a94d2cebcbc541bfb"
+  }'
+```
+
+</CodeGroup>
+
+### Set an address as default
+
+```bash
+curl -X PATCH https://your-shop.example.com/api/customer/{id} \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "defaultShippingAddressId": "<address-uuid>" }'
+```
+
+---
+
+## Customer groups
+
+Customer groups control which price lists and discounts apply to a customer. Manage groups via the `/api/customer-group` endpoint.
+
+<CodeGroup>
+
+```bash GET /api/customer-group
+curl https://your-shop.example.com/api/customer-group \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```bash POST /api/customer-group
+curl -X POST https://your-shop.example.com/api/customer-group \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Wholesale",
+    "displayGross": false,
+    "registrationActive": false
+  }'
+```
+
+</CodeGroup>
+
+<Note>
+  To move a customer into a different group, PATCH the customer with the new `groupId`. Price changes take effect on the next storefront session.
+</Note>

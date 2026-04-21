@@ -1,0 +1,116 @@
+---
+title: "Shopware: Open-Source API-First Commerce Platform"
+description: "Learn what Shopware is, how its Symfony 7 and Vue.js 3 foundation work, and why its API-first design sets it apart from traditional e-commerce platforms."
+---
+
+Shopware is an open-source e-commerce platform and framework built on [Symfony 7](https://symfony.com) and [Vue.js 3](https://vuejs.org). Unlike traditional monolithic e-commerce systems, Shopware is designed API-first: every piece of functionality — from the product catalog to the checkout — is accessible through REST APIs. You can run Shopware as a fully featured shop with a built-in storefront, use it headless with a custom frontend, or embed it as a vendor dependency in your own Symfony Flex project.
+
+## What Shopware is
+
+Shopware serves multiple roles depending on how you use it:
+
+- **A ready-to-use shop system** with a Twig-based storefront, a Vue 3 admin panel, and a complete set of commerce features out of the box.
+- **An e-commerce framework** that you can require as a Composer package in a [Symfony Flex project](https://developer.shopware.com/docs/guides/installation/template) and configure to your needs.
+- **A headless commerce engine** that exposes its full data model and business logic through three distinct REST APIs.
+- **An extensible platform** with a plugin system built on Symfony bundles and a lightweight App system that requires no direct Shopware PHP knowledge.
+
+## Architecture overview
+
+### Three APIs
+
+Shopware exposes three purpose-built APIs, each scoped to a specific audience:
+
+| API | Base path | Purpose |
+|-----|-----------|---------|
+| Admin API | `/api/` | Full CRUD access for back-office operations, used by the admin panel |
+| Store API | `/store-api/` | Customer-facing operations for storefronts and custom frontends |
+| Sync API | `/api/_action/sync` | Bulk upsert and delete operations for data imports and integrations |
+
+All three APIs are REST-based, accept and return JSON, and support the same criteria-based filtering and association loading syntax.
+
+### Data Abstraction Layer
+
+Shopware does not use Doctrine ORM. Instead, it uses its own **Data Abstraction Layer (DAL)**, which provides:
+
+- `EntityDefinition` classes that describe entity structure, fields, and associations
+- A `Criteria` API for building type-safe, fluent queries — no raw SQL or QueryBuilder needed
+- `EntityRepository` classes injected as Symfony services for reading and writing data
+- Automatic API endpoint generation from entity definitions
+
+### Storefront
+
+The built-in storefront is a Twig-based server-rendered frontend layered on top of the Store API. It uses Bootstrap 5 for styling, Webpack 5 for asset bundling, and Shopware's theme system for customization. Twig templates can be overridden by themes and plugins through Symfony's bundle override mechanism.
+
+### Administration
+
+The admin panel is a Vue 3 single-page application that communicates exclusively with the Admin API. It uses a combination of Pinia and legacy Vuex for state management, Vite for local development, and TypeScript. Admin modules, components, and routes added by plugins are registered at runtime through a well-defined extension API.
+
+### Extension system
+
+Shopware supports two extension models:
+
+- **Plugins** — Symfony bundles loaded into the Shopware kernel. Plugins can register Symfony services, event subscribers, console commands, API routes, admin modules, and database migrations. They have full access to the Shopware process and database.
+- **Apps** — A manifest-based extension format that communicates with Shopware through webhooks, app scripts (server-side Twig), and the Admin Extensions SDK. Apps do not require PHP knowledge and are compatible with cloud-hosted Shopware instances.
+
+### Event system
+
+Shopware uses Symfony's event dispatcher throughout the codebase. Rather than decorator patterns, business logic is extended by subscribing to events dispatched before and after core operations (entity writes, order state transitions, checkout steps, and more).
+
+## Who Shopware is for
+
+| Audience | Use case |
+|----------|----------|
+| **Merchants** | Run a production shop using the managed cloud offering or an on-premise installation |
+| **Developers** | Build and maintain custom shops, plugins, apps, and integrations |
+| **Agencies** | Deliver client projects using Shopware's Flex template and extension ecosystem |
+| **Integrators** | Connect Shopware to ERP, PIM, and other systems via its REST APIs and Sync API |
+
+## Project structure
+
+The Shopware monorepo contains four main source packages, all under `src/`:
+
+```
+shopware/
+├── src/
+│   ├── Core/           # Business logic, DAL, APIs, event system, plugin system
+│   ├── Administration/ # Vue 3 admin panel
+│   ├── Storefront/     # Twig-based storefront
+│   └── Elasticsearch/  # OpenSearch/Elasticsearch integration
+├── bin/
+│   └── console         # Symfony console entry point
+├── config/             # Symfony configuration
+├── custom/
+│   ├── plugins/        # Local plugins (Composer path repository)
+│   └── apps/           # Local apps
+└── compose.yaml        # Docker Compose setup for local development
+```
+
+The four packages — `shopware/core`, `shopware/administration`, `shopware/storefront`, and `shopware/elasticsearch` — are distributed together as `shopware/platform` on Packagist and replaced at the package level via Composer's `replace` field.
+
+## Technology stack
+
+| Layer | Technology |
+|-------|-----------|
+| Backend | PHP 8.2–8.5, Symfony 7, Doctrine DBAL 4 |
+| Admin frontend | Vue 3, Pinia, Vite, TypeScript |
+| Storefront frontend | Twig, Bootstrap 5, Webpack 5 |
+| Database | MySQL 8+ or MariaDB 10.11+ |
+| Search | OpenSearch 2 or Elasticsearch 8 (optional) |
+| Cache | Symfony Cache, Redis (optional) |
+
+## Explore the documentation
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get a local Shopware instance running with Docker and make your first Store API call.
+  </Card>
+  <Card title="Installation" icon="wrench" href="/installation">
+    System requirements, Docker setup, and the Symfony Flex template installation method.
+  </Card>
+  <Card title="Architecture overview" icon="sitemap" href="/architecture/overview">
+    Deep dive into the DAL, the three-API model, Sales Channels, and the event system.
+  </Card>
+  <Card title="Extending Shopware" icon="puzzle-piece" href="/extensions/apps">
+    Learn the difference between Apps and Plugins and choose the right extension model.
+  </Card>
+</CardGroup>

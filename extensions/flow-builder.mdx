@@ -1,0 +1,288 @@
+---
+title: "Automate workflows with Shopware Flow Builder"
+description: "Build visual business automations in Shopware with triggers and actions, and extend the Flow Builder with custom PHP events and action handlers for your use case."
+---
+
+Flow Builder is Shopware's visual workflow automation engine. Instead of writing procedural code that listens to events and dispatches emails or changes order states, you configure flows in the Administration: pick a trigger, optionally add conditions, then chain a sequence of actions. Shopware persists each flow as a `flow` entity (defined in `FlowDefinition`) with fields for `eventName`, `priority`, `active`, and a serialized `payload` that encodes the action tree.
+
+The system was introduced in Shopware 6.4.6.0 and is tagged with `#[Package('after-sales')]`. Every flow references exactly one `eventName` and can optionally link to an `appFlowEvent` for custom app-defined triggers.
+
+## Core concepts
+
+<CardGroup cols={3}>
+  <Card title="Trigger" icon="bolt">
+    A named Shopware event (e.g. `checkout.order.placed`) that starts the flow. Each flow listens to exactly one trigger.
+  </Card>
+  <Card title="Condition" icon="filter">
+    An optional rule that gates whether the action sequence runs. Uses the same Rule engine as dynamic product groups and promotions.
+  </Card>
+  <Card title="Action" icon="play">
+    A discrete operation Shopware executes when the condition passes — send an email, add a tag, change an order state, call a webhook, etc.
+  </Card>
+</CardGroup>
+
+## Available triggers
+
+These are the most commonly used built-in event names for flow triggers:
+
+| Event name | When it fires |
+|------------|---------------|
+| `checkout.order.placed` | A customer completes checkout |
+| `checkout.order.payment_method.changed` | Payment method is switched on an existing order |
+| `state_enter.order.state.cancelled` | Order transitions into the `cancelled` state |
+| `state_enter.order.state.completed` | Order transitions into the `completed` state |
+| `state_enter.order_delivery.state.shipped` | Delivery transitions into the `shipped` state |
+| `state_enter.order_transaction.state.paid` | Payment transitions into the `paid` state |
+| `customer.registered` | A new customer account is created |
+| `customer.group.registration.accepted` | A customer group registration request is approved |
+| `newsletter.confirm` | A subscriber confirms their newsletter opt-in |
+| `product.written` | A product entity is created or updated |
+| `contact_form.send` | The storefront contact form is submitted |
+
+<Note>
+  State-machine events follow the pattern `state_enter.{entity}.state.{to_state}` and `state_leave.{entity}.state.{from_state}`. Use `bin/console debug:event-dispatcher` to list every registered event in your instance.
+</Note>
+
+## Available actions
+
+Built-in actions cover the most common post-order and customer automation needs:
+
+<Tabs>
+  <Tab title="Order actions">
+    | Action | Description |
+    |--------|-------------|
+    | Change order status | Transitions the order state machine |
+    | Change payment status | Transitions the order transaction state |
+    | Change delivery status | Transitions the order delivery state |
+    | Add order tag | Attaches a tag to the order entity |
+    | Remove order tag | Detaches a tag from the order entity |
+    | Generate document | Creates an invoice, delivery note, or credit note PDF |
+    | Send order confirmation mail | Sends the `order_confirmation_mail` template |
+  </Tab>
+  <Tab title="Customer actions">
+    | Action | Description |
+    |--------|-------------|
+    | Add customer tag | Attaches a tag to the customer |
+    | Remove customer tag | Detaches a tag from the customer |
+    | Change customer group | Moves the customer to a different group |
+    | Set customer custom field | Writes a value to a custom field |
+  </Tab>
+  <Tab title="Generic actions">
+    | Action | Description |
+    |--------|-------------|
+    | Send email | Sends any email template to a recipient resolved from the event |
+    | Grant download access | Grants access to a digital product download |
+    | Set custom field | Writes a custom field value on the event's entity |
+    | Stop flow | Halts further action execution (useful in branches) |
+    | Add webhook call | Sends a signed HTTP POST to a URL (App webhook) |
+  </Tab>
+</Tabs>
+
+## Creating a custom flow event in PHP
+
+To expose your own business event as a Flow Builder trigger, implement `FlowEventAware` and dispatch it through Symfony's event dispatcher. Shopware automatically discovers events that implement this interface and makes them available in the trigger dropdown.
+
+```php
+<?php declare(strict_types=1);
+
+namespace Acme\MyPlugin\Event;
+
+use Shopware\Core\Framework\Context;
+use Shopware\Core\Framework\Event\EventData\EventDataCollection;
+use Shopware\Core\Framework\Event\EventData\ScalarValueType;
+use Shopware\Core\Framework\Event\EventData\EntityType;
+use Shopware\Core\Framework\Event\FlowEventAware;
+use Shopware\Core\Checkout\Order\OrderDefinition;
+use Shopware\Core\Checkout\Order\OrderEntity;
+use Symfony\Contracts\EventDispatcher\Event;
+
+class AcmeSyncFailedEvent extends Event implements FlowEventAware
+{
+    public const EVENT_NAME = 'acme.sync.failed';
+
+    public function __construct(
+        private readonly OrderEntity $order,
+        private readonly string $failureReason,
+        private readonly Context $context,
+    ) {
+    }
+
+    public static function getAvailableData(): EventDataCollection
+    {
+        return (new EventDataCollection())
+            ->add('order', new EntityType(OrderDefinition::class))
+            ->add('failureReason', new ScalarValueType(ScalarValueType::TYPE_STRING));
+    }
+
+    public function getName(): string
+    {
+        return self::EVENT_NAME;
+    }
+
+    public function getOrder(): OrderEntity
+    {
+        return $this->order;
+    }
+
+    public function getFailureReason(): string
+    {
+        return $this->failureReason;
+    }
+
+    public function getContext(): Context
+    {
+        return $this->context;
+    }
+}
+```
+
+Register the event as a service and tag it so Flow Builder can discover it:
+
+```xml
+<service id="Acme\MyPlugin\Event\AcmeSyncFailedEvent">
+    <tag name="shopware.flow.event"/>
+</service>
+```
+
+Dispatch it from wherever the failure occurs:
+
+```php
+$this->eventDispatcher->dispatch(
+    new AcmeSyncFailedEvent($order, 'Connection timeout', $context),
+    AcmeSyncFailedEvent::EVENT_NAME
+);
+```
+
+<Tip>
+  The `getAvailableData()` method defines what variables are available inside the flow's action context. Declare every entity or scalar you want action authors to access — for example, the `order` entry lets the **Send email** action use `{{ order.orderNumber }}` in templates.
+</Tip>
+
+## Creating a custom flow action in PHP
+
+Custom actions implement `FlowAction` and register themselves as tagged services. Shopware injects the action context — which carries the original event data — so your action can access all variables the trigger exposed.
+
+```php
+<?php declare(strict_types=1);
+
+namespace Acme\MyPlugin\Flow\Action;
+
+use Acme\MyPlugin\Service\SyncService;
+use Shopware\Core\Content\Flow\Dispatching\Action\FlowAction;
+use Shopware\Core\Content\Flow\Dispatching\StorableFlow;
+use Shopware\Core\Framework\Event\OrderAware;
+
+class SyncOrderToAcmeAction extends FlowAction
+{
+    public function __construct(
+        private readonly SyncService $syncService,
+    ) {
+    }
+
+    public static function getName(): string
+    {
+        return 'action.acme.sync_order';
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function requirements(): array
+    {
+        // This action is only available on flows whose trigger implements OrderAware.
+        return [OrderAware::class];
+    }
+
+    public function handleFlow(StorableFlow $flow): void
+    {
+        $orderId = $flow->getStore(OrderAware::ORDER_ID);
+
+        if (!$orderId) {
+            return;
+        }
+
+        $this->syncService->syncOrder($orderId, $flow->getContext());
+    }
+}
+```
+
+Register and tag the action:
+
+```xml
+<service id="Acme\MyPlugin\Flow\Action\SyncOrderToAcmeAction">
+    <argument type="service" id="Acme\MyPlugin\Service\SyncService"/>
+    <tag name="shopware.flow.action"/>
+</service>
+```
+
+Add a label snippet so the action displays a human-readable name in the Administration:
+
+```json
+// src/Resources/snippet/en_GB/acme-flow.en-GB.json
+{
+  "sw-flow-action": {
+    "acme": {
+      "sync-order": {
+        "label": "Sync order to Acme",
+        "description": "Pushes the order to the Acme integration platform."
+      }
+    }
+  }
+}
+```
+
+## Flow priority and execution order
+
+When multiple flows listen to the same event, the `priority` field (default `1`) controls execution order — higher numbers run first. Flows with the same priority run in insertion order.
+
+```bash
+# Inspect all active flows and their priorities via the Admin API
+GET /api/flow?filter[active]=true&sort=-priority
+```
+
+The `FlowDefinition` also exposes an `invalid` flag. Shopware sets this to `true` automatically when a flow's action or trigger references a component that no longer exists (e.g., after a plugin is removed). Invalid flows are skipped at runtime without throwing exceptions.
+
+<Warning>
+  A flow marked `invalid=true` is silently skipped. After removing a plugin that provided a custom action, audit your flows via `GET /api/flow?filter[invalid]=true` and repair or delete them to avoid silent failures.
+</Warning>
+
+## Building a flow end-to-end
+
+<Steps>
+  <Step title="Define the event">
+    Create your event class implementing `FlowEventAware`. Declare all entity and scalar data it exposes via `getAvailableData()`.
+  </Step>
+
+  <Step title="Register and tag the event">
+    ```xml
+    <service id="Acme\MyPlugin\Event\AcmeSyncFailedEvent">
+        <tag name="shopware.flow.event"/>
+    </service>
+    ```
+  </Step>
+
+  <Step title="Dispatch the event">
+    ```php
+    $this->eventDispatcher->dispatch(
+        new AcmeSyncFailedEvent($order, $reason, $context),
+        AcmeSyncFailedEvent::EVENT_NAME
+    );
+    ```
+  </Step>
+
+  <Step title="Create the action">
+    Implement `FlowAction`, define `getName()` and `requirements()`, and write your business logic in `handleFlow()`.
+  </Step>
+
+  <Step title="Register and tag the action">
+    ```xml
+    <service id="Acme\MyPlugin\Flow\Action\SyncOrderToAcmeAction">
+        <argument type="service" id="Acme\MyPlugin\Service\SyncService"/>
+        <tag name="shopware.flow.action"/>
+    </service>
+    ```
+  </Step>
+
+  <Step title="Configure the flow in the Admin">
+    Navigate to **Settings → Flow Builder → Create flow**. Select your custom event as the trigger, optionally add a condition rule, then add your custom action. Activate the flow and verify it fires by triggering the event.
+  </Step>
+</Steps>

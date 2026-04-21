@@ -1,0 +1,194 @@
+---
+title: "Shopware API overview: Admin, Store, and Sync"
+description: "Shopware exposes three REST APIs—Admin, Store, and Sync—each designed for a distinct use case. Learn base URLs, auth requirements, and when to use each."
+---
+
+Shopware's API-first architecture gives you three distinct REST APIs. The **Admin API** (`/api/`) is for back-office operations like managing products, orders, and customers. The **Store API** (`/store-api/`) is the customer-facing surface used by storefronts and headless clients. The **Sync API** (`/api/_action/sync`) is a bulk-write endpoint that lets you upsert or delete large sets of entities in a single request. Every API returns JSON and shares a common error envelope format.
+
+## API comparison
+
+| | Admin API | Store API | Sync API |
+|---|---|---|---|
+| **Base path** | `/api/` | `/store-api/` | `/api/_action/sync` |
+| **Auth** | OAuth 2.0 Bearer token | `sw-access-key` header | OAuth 2.0 Bearer token |
+| **Use case** | Full CRUD, back-office automation | Storefront, headless frontend | Bulk upsert / delete |
+| **Typical caller** | Backend services, integrations | Storefronts, PWA, mobile apps | Data imports, migrations |
+| **Pagination** | `limit` / `page` in criteria | `limit` / `page` in criteria | N/A (write-only) |
+| **Filtering** | Criteria in request body | Criteria in request body | Per-operation criteria |
+
+## The three APIs
+
+<CardGroup cols={3}>
+  <Card title="Admin API" icon="shield-halved" href="/api/authentication">
+    Full CRUD access to every entity. Requires an OAuth 2.0 Bearer token obtained via client credentials or password grant.
+  </Card>
+  <Card title="Store API" icon="store" href="/api/authentication">
+    Customer-facing endpoints for product listings, cart, checkout, and account management. Authenticated with a sales-channel access key.
+  </Card>
+  <Card title="Sync API" icon="arrows-rotate" href="/api/authentication">
+    Single endpoint for high-throughput bulk writes. Send an array of operations; each targets an entity with an `upsert` or `delete` action.
+  </Card>
+</CardGroup>
+
+## Base URLs
+
+All paths are relative to your Shopware instance root (for example, `https://shop.example.com`).
+
+| API | Base URL |
+|---|---|
+| Admin API | `https://shop.example.com/api/` |
+| Store API | `https://shop.example.com/store-api/` |
+| Sync API | `https://shop.example.com/api/_action/sync` |
+
+<Note>
+  The Admin and Sync APIs share the `/api/` prefix and the same OAuth authentication flow. The Store API is a completely separate surface with its own access-key scheme.
+</Note>
+
+## Response format
+
+All responses are JSON. Successful list responses from the Admin API use an envelope with `data`, `total`, and optional `aggregations` keys. Single-entity responses return the entity object directly under `data`.
+
+```json
+{
+  "total": 142,
+  "data": [
+    {
+      "id": "01920d1f3b7e7b1c9e4e5f6a7b8c9d0e",
+      "name": "Premium T-Shirt",
+      "stock": 50,
+      "active": true
+    }
+  ],
+  "aggregations": {}
+}
+```
+
+Store API responses are shaped per endpoint and do not use the same wrapping envelope.
+
+## Pagination
+
+Pass pagination parameters inside the `criteria` JSON body on `POST` search requests, or as query parameters on `GET` list requests.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `limit` | integer | Number of results per page (default: 25, max: 500) |
+| `page` | integer | 1-based page number |
+| `offset` | integer | Alternative to `page`; number of records to skip |
+
+```bash
+curl -X POST https://shop.example.com/api/search/product \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 25,
+    "page": 2
+  }'
+```
+
+## Filtering with criteria
+
+The Admin and Store APIs accept a `criteria` object in the request body to filter, sort, and aggregate results. Filters use a structured format with `type`, `field`, and `value`.
+
+```bash
+curl -X POST https://shop.example.com/api/search/product \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 10,
+    "filter": [
+      {
+        "type": "equals",
+        "field": "active",
+        "value": true
+      },
+      {
+        "type": "range",
+        "field": "stock",
+        "parameters": { "gte": 1 }
+      }
+    ],
+    "sort": [
+      { "field": "name", "order": "ASC" }
+    ]
+  }'
+```
+
+Common filter types: `equals`, `equalsAny`, `contains`, `range`, `not`, `multi`.
+
+## Error format
+
+All APIs return errors as a JSON array under the `errors` key with an HTTP status code that matches the primary error.
+
+```json
+{
+  "errors": [
+    {
+      "status": "404",
+      "code": "FRAMEWORK__ENTITY_NOT_FOUND",
+      "title": "Entity not found",
+      "detail": "The product with id \"abc\" was not found."
+    }
+  ]
+}
+```
+
+<Warning>
+  Always check the `errors` array even on `207 Multi-Status` responses from the Sync API—partial failures are reported inline while the HTTP status remains `200`.
+</Warning>
+
+## API versioning
+
+Shopware follows a versioning strategy tied to major releases. The API path does not include a version segment; breaking changes are introduced only in major versions (e.g., `v6.7` → `v6.8`). Use the `sw-expect-packages` request header if you need to assert that a specific Shopware package version is present before your request is processed.
+
+## Quick-start examples
+
+<Tabs>
+  <Tab title="Admin API">
+    ```bash
+    # 1. Get an access token (client credentials)
+    curl -X POST https://shop.example.com/api/oauth/token \
+      -H "Content-Type: application/json" \
+      -d '{
+        "grant_type": "client_credentials",
+        "client_id": "YOUR_CLIENT_ID",
+        "client_secret": "YOUR_CLIENT_SECRET"
+      }'
+
+    # 2. List products
+    curl https://shop.example.com/api/product \
+      -H "Authorization: Bearer $ACCESS_TOKEN"
+    ```
+  </Tab>
+  <Tab title="Store API">
+    ```bash
+    # Fetch the product listing for a category
+    curl -X POST https://shop.example.com/store-api/product-listing/CATEGORY_ID \
+      -H "sw-access-key: YOUR_SALES_CHANNEL_ACCESS_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{ "limit": 24 }'
+    ```
+  </Tab>
+  <Tab title="Sync API">
+    ```bash
+    # Bulk upsert two products in one request
+    curl -X POST https://shop.example.com/api/_action/sync \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '[
+        {
+          "key": "product-upsert",
+          "action": "upsert",
+          "entity": "product",
+          "payload": [
+            { "id": "01920d1f3b7e7b1c9e4e5f6a7b8c9d0e", "name": "T-Shirt", "stock": 100 },
+            { "id": "01920d1f3b7e7b1c9e4e5f6a7b8c9d0f", "name": "Hoodie", "stock": 50 }
+          ]
+        }
+      ]'
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  For bulk data imports—products, categories, prices—the Sync API is significantly faster than individual Admin API calls because it processes all operations in a single database transaction.
+</Tip>

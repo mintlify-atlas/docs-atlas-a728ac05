@@ -1,0 +1,229 @@
+---
+title: "Store API: browse products and categories"
+description: "Search and retrieve products, categories, and navigation trees from your Shopware storefront using the Store API and a sales channel access key."
+---
+
+The Store API lets you browse your Shopware catalog without admin credentials. Every request requires an `sw-access-key` header tied to a sales channel. You can search products with rich criteria, fetch single product details, list categories, load navigation trees, and run full-text searches.
+
+<Info>
+  All Store API endpoints require the `sw-access-key` header. Obtain the key from your sales channel configuration in the Shopware administration.
+</Info>
+
+## Authentication
+
+```bash
+sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX
+```
+
+Include this header on every request. No bearer token or session is needed for public catalog endpoints.
+
+---
+
+## Search products
+
+`POST /store-api/product`
+
+Returns a paginated, filterable list of products. Pass a [criteria object](https://developer.shopware.com/docs/concepts/framework/data-abstraction-layer/search-criteria) in the request body.
+
+<ParamField body="page" type="integer">
+  Page number (1-based). Defaults to `1`.
+</ParamField>
+
+<ParamField body="limit" type="integer">
+  Number of results per page. Defaults to `24`, maximum `500`.
+</ParamField>
+
+<ParamField body="filter" type="array">
+  Array of DAL filter objects (e.g. `equals`, `range`, `contains`).
+</ParamField>
+
+<ParamField body="sort" type="array">
+  Array of sort objects with `field` and `order` (`ASC` or `DESC`).
+</ParamField>
+
+<ParamField body="includes" type="object">
+  Sparse fieldset map. Restrict which fields are returned per entity to reduce payload size.
+</ParamField>
+
+<CodeGroup>
+
+```bash search products
+curl -X POST https://your-store.example.com/store-api/product \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "page": 1,
+    "limit": 12,
+    "filter": [
+      { "type": "equals", "field": "active", "value": true }
+    ],
+    "sort": [
+      { "field": "name", "order": "ASC" }
+    ]
+  }'
+```
+
+```json response
+{
+  "total": 42,
+  "page": 1,
+  "limit": 12,
+  "elements": [
+    {
+      "id": "01930b2a3c4d5e6f7a8b9c0d1e2f3a4b",
+      "name": "Example T-Shirt",
+      "active": true,
+      "price": [{ "gross": 29.99, "net": 25.20, "currencyId": "..." }]
+    }
+  ]
+}
+```
+
+</CodeGroup>
+
+---
+
+## Get a single product
+
+`GET /store-api/product/{productId}`
+
+Fetches full detail for one product, including variants, media, and cross-selling associations.
+
+<ParamField path="productId" type="string" required>
+  The UUID of the product.
+</ParamField>
+
+<CodeGroup>
+
+```bash get product
+curl https://your-store.example.com/store-api/product/01930b2a3c4d5e6f7a8b9c0d1e2f3a4b \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX"
+```
+
+```json response
+{
+  "product": {
+    "id": "01930b2a3c4d5e6f7a8b9c0d1e2f3a4b",
+    "name": "Example T-Shirt",
+    "description": "<p>High quality cotton t-shirt.</p>",
+    "stock": 100,
+    "price": [{ "gross": 29.99, "net": 25.20 }]
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## List categories
+
+`POST /store-api/category`
+
+Returns the category tree. Supports the same criteria object as product search.
+
+<CodeGroup>
+
+```bash list categories
+curl -X POST https://your-store.example.com/store-api/category \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "filter": [
+      { "type": "equals", "field": "active", "value": true },
+      { "type": "equals", "field": "visible", "value": true }
+    ]
+  }'
+```
+
+```json response
+{
+  "total": 8,
+  "elements": [
+    {
+      "id": "abc123",
+      "name": "Clothing",
+      "parentId": null,
+      "level": 1
+    }
+  ]
+}
+```
+
+</CodeGroup>
+
+---
+
+## Load navigation tree
+
+`GET /store-api/navigation/{activeId}/{rootId}`
+
+Returns a nested navigation structure suitable for rendering header menus.
+
+<ParamField path="activeId" type="string" required>
+  The UUID of the currently active navigation entry, or one of the special values `main-navigation`, `footer-navigation`, `service-navigation`.
+</ParamField>
+
+<ParamField path="rootId" type="string" required>
+  The UUID of the root navigation entry to resolve from.
+</ParamField>
+
+<ParamField query="sw-include-seo-urls" type="boolean">
+  Set to `1` to include SEO URL objects in the response.
+</ParamField>
+
+<CodeGroup>
+
+```bash navigation tree
+curl "https://your-store.example.com/store-api/navigation/main-navigation/main-navigation" \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX"
+```
+
+```json response
+[
+  {
+    "id": "abc123",
+    "name": "Clothing",
+    "children": [
+      { "id": "def456", "name": "Men", "children": [] }
+    ]
+  }
+]
+```
+
+</CodeGroup>
+
+---
+
+## Full-text search
+
+`POST /store-api/search`
+
+Runs a keyword search across products. Accepts the same criteria body as `POST /store-api/product` plus a required `search` field.
+
+<ParamField body="search" type="string" required>
+  The search term entered by the customer.
+</ParamField>
+
+<CodeGroup>
+
+```bash full-text search
+curl -X POST https://your-store.example.com/store-api/search \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "search": "t-shirt",
+    "limit": 10
+  }'
+```
+
+```json response
+{
+  "total": 5,
+  "elements": [
+    { "id": "...", "name": "Example T-Shirt" }
+  ]
+}
+```
+
+</CodeGroup>

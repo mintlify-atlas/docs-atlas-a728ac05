@@ -1,97 +1,59 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Shopware: Open-Source E-Commerce Framework"
+description: "Shopware is an API-first e-commerce platform built on Symfony and Vue.js. Build shops, extend with plugins and apps, or use it as a headless commerce engine."
 ---
 
-## Setting up
+Shopware is a modern, open-source e-commerce framework used by thousands of merchants worldwide. Whether you're building a custom storefront, integrating with external systems via its REST APIs, or extending functionality through plugins and apps, Shopware gives you everything you need.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Set up a local Shopware development environment and make your first API call in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    Understand Shopware's core concepts: the DAL, Sales Channels, event system, and three-API design.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Extend with Apps" icon="puzzle-piece" href="/extensions/apps">
+    Build lightweight, cloud-compatible extensions using the Shopware App system and manifest.xml.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Extend with Plugins" icon="plug" href="/extensions/plugins">
+    Create full Symfony bundles that hook deep into Shopware's core for maximum control.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Explore the platform
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore the Admin API, Store API, and Sync API — all REST-based and fully documented.
+  </Card>
+  <Card title="Storefront Theming" icon="paintbrush" href="/storefront/overview">
+    Customize your storefront using Twig templates and Bootstrap 5 with Shopware's theme system.
+  </Card>
+  <Card title="Admin UI" icon="display" href="/administration/overview">
+    Build Vue 3 modules and components that integrate seamlessly into the Shopware admin panel.
+  </Card>
+  <Card title="Flow Builder" icon="arrow-right-arrow-left" href="/extensions/flow-builder">
+    Automate business processes like sending emails or updating orders using Shopware's visual Flow Builder.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Key concepts
 
-## Need inspiration?
+<Steps>
+  <Step title="Install Shopware">
+    Use the Symfony Flex template or Docker to get a local instance running. See the [installation guide](/installation).
+  </Step>
+  <Step title="Understand the architecture">
+    Learn about the Data Abstraction Layer (DAL), the three-API model, and the event system before building. Start with the [architecture overview](/architecture/overview).
+  </Step>
+  <Step title="Choose your extension method">
+    Use **Apps** for cloud-compatible, lightweight extensions via webhooks and scripts. Use **Plugins** when you need direct access to the Shopware process and database.
+  </Step>
+  <Step title="Build and test">
+    Create entities, subscribe to events, add API routes, and build admin UI modules. Use `bin/console` for scaffolding and migration management.
+  </Step>
+</Steps>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Note>
+  Shopware is released under the MIT license. The source code is available at [github.com/shopware/shopware](https://github.com/shopware/shopware).
+</Note>

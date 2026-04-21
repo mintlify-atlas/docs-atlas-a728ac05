@@ -1,0 +1,309 @@
+---
+title: "Shopware event system and hooks"
+description: "How Shopware dispatches and handles events, the business event hierarchy, App Script hooks for apps, and best practices for event-driven plugin extensions."
+---
+
+Shopware's extension system is built around events as the primary integration point. Both core operations and domain actions dispatch events that plugins can subscribe to without modifying core classes. This page explains the event hierarchy, how to subscribe to events in a plugin, what business events are, and how App Script hooks provide the equivalent mechanism for apps running off-server.
+
+## How events work
+
+Shopware uses Symfony's `EventDispatcherInterface` throughout the codebase. Every `EntityRepository` write operation dispatches an `EntityWrittenContainerEvent`. Every Store API request, cart calculation, and order placement dispatches domain-specific events. Subscribers receive these events, inspect their payloads, and optionally modify mutable data.
+
+All Shopware events implement `ShopwareEvent`:
+
+```php
+interface ShopwareEvent
+{
+    public function getContext(): Context;
+}
+```
+
+Events that occur within a sales channel request additionally implement `ShopwareSalesChannelEvent`, which adds `getSalesChannelContext(): SalesChannelContext`.
+
+## Subscribing to events
+
+Implement Symfony's `EventSubscriberInterface` and return a map of event class names to handler methods from `getSubscribedEvents()`.
+
+```php
+<?php declare(strict_types=1);
+
+namespace MyPlugin\Subscriber;
+
+use Shopware\Core\Checkout\Cart\Event\CheckoutOrderPlacedEvent;
+use Shopware\Core\Framework\DataAbstractionLayer\Event\EntityWrittenEvent;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+
+class OrderSubscriber implements EventSubscriberInterface
+{
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            CheckoutOrderPlacedEvent::class => 'onOrderPlaced',
+        ];
+    }
+
+    public function onOrderPlaced(CheckoutOrderPlacedEvent $event): void
+    {
+        $order = $event->getOrder();
+        $salesChannelId = $event->getSalesChannelId();
+
+        // React to the order being placed
+    }
+}
+```
+
+Register the subscriber as a service. Shopware auto-tags classes that implement `EventSubscriberInterface` when using autoconfigure:
+
+```xml
+<!-- Resources/config/services.xml -->
+<service id="MyPlugin\Subscriber\OrderSubscriber">
+    <tag name="kernel.event_subscriber"/>
+</service>
+```
+
+Or with YAML:
+
+```yaml
+# Resources/config/services.yaml
+MyPlugin\Subscriber\OrderSubscriber:
+    tags:
+        - { name: kernel.event_subscriber }
+```
+
+## The event hierarchy
+
+<AccordionGroup>
+  <Accordion title="DAL events">
+    Every repository operation dispatches events from `Shopware\Core\Framework\DataAbstractionLayer\Event`:
+
+    | Event | When fired |
+    |-------|-----------|
+    | `EntityWrittenEvent` | After a successful create, update, upsert, or delete |
+    | `EntityWrittenContainerEvent` | Wraps one or more `EntityWrittenEvent` instances from a single operation |
+    | `EntityLoadedEvent` | After entities are hydrated from the database |
+    | `EntitySearchResultLoadedEvent` | After a `search()` call completes |
+    | `EntitySearchedEvent` | Before the search query is executed (allows criteria modification) |
+    | `EntityAggregationResultLoadedEvent` | After an `aggregate()` call completes |
+
+    ```php
+    use Shopware\Core\Framework\DataAbstractionLayer\Event\EntityWrittenContainerEvent;
+
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            EntityWrittenContainerEvent::class => 'onEntityWritten',
+        ];
+    }
+
+    public function onEntityWritten(EntityWrittenContainerEvent $event): void
+    {
+        // Check if product was written
+        $productEvents = $event->getEventByEntityName('product');
+        if ($productEvents === null) {
+            return;
+        }
+
+        foreach ($productEvents->getIds() as $productId) {
+            // React to each written product ID
+        }
+    }
+    ```
+  </Accordion>
+  <Accordion title="Cart and checkout events">
+    Cart events are in `Shopware\Core\Checkout\Cart\Event`:
+
+    | Event | When fired |
+    |-------|-----------|
+    | `BeforeLineItemAddedEvent` | Before a line item is added to the cart |
+    | `AfterLineItemAddedEvent` | After a line item is added |
+    | `BeforeLineItemRemovedEvent` | Before a line item is removed |
+    | `AfterLineItemRemovedEvent` | After a line item is removed |
+    | `CartCreatedEvent` | When a new cart is initialized |
+    | `CartLoadedEvent` | When an existing cart is loaded |
+    | `CheckoutOrderPlacedEvent` | When an order is successfully placed |
+
+    `CheckoutOrderPlacedEvent` is also a **Flow event** (see below) and implements `FlowEventAware`.
+  </Accordion>
+  <Accordion title="SalesChannel events">
+    `Shopware\Core\System\SalesChannel\SalesChannelEvents` contains constants for events related to sales channel entity writes. These follow the pattern `<entity>.written`, `<entity>.deleted`, etc., and are fired by the DAL.
+  </Accordion>
+</AccordionGroup>
+
+## Cart modification example
+
+The `BeforeLineItemAddedEvent` gives you access to the mutable `LineItem` before it is added to the cart, making it the right place to inject custom data or reject items:
+
+```php
+<?php declare(strict_types=1);
+
+namespace MyPlugin\Subscriber;
+
+use Shopware\Core\Checkout\Cart\Event\BeforeLineItemAddedEvent;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+
+class CartSubscriber implements EventSubscriberInterface
+{
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            BeforeLineItemAddedEvent::class => 'onBeforeLineItemAdded',
+        ];
+    }
+
+    public function onBeforeLineItemAdded(BeforeLineItemAddedEvent $event): void
+    {
+        $lineItem = $event->getLineItem();
+        $salesChannelContext = $event->getSalesChannelContext();
+
+        // Attach custom payload that the cart processor can read
+        $lineItem->setPayloadValue('myPlugin_customData', 'value');
+    }
+}
+```
+
+## Business events and Flow Builder
+
+Business events implement `FlowEventAware` and integrate with Shopware's Flow Builder, a no-code automation tool in the Administration. A Flow Builder flow reacts to a business event and executes actions such as sending an email, adding a tag, or calling a webhook.
+
+`CheckoutOrderPlacedEvent` is the canonical example:
+
+```php
+// From src/Core/Checkout/Cart/Event/CheckoutOrderPlacedEvent.php
+class CheckoutOrderPlacedEvent extends Event implements
+    SalesChannelAware,
+    SalesChannelContextAware,
+    OrderAware,
+    MailAware,
+    CustomerAware,
+    CustomerGroupAware,
+    FlowEventAware
+{
+    final public const EVENT_NAME = 'checkout.order.placed';
+
+    public function __construct(
+        private readonly SalesChannelContext $context,
+        private readonly OrderEntity $order,
+        private ?MailRecipientStruct $mailRecipientStruct = null
+    ) {}
+
+    public function getName(): string
+    {
+        return self::EVENT_NAME;
+    }
+
+    public static function getAvailableData(): EventDataCollection
+    {
+        return (new EventDataCollection())
+            ->add('order', new EntityType(OrderDefinition::class));
+    }
+}
+```
+
+The aware interfaces (`OrderAware`, `MailAware`, etc.) tell the Flow Builder which data is available for actions and conditions. For example, `MailAware` enables "Send email" actions against this event.
+
+### Registering a custom business event
+
+To expose your own event in the Flow Builder, implement `FlowEventAware` and declare its available data:
+
+```php
+<?php declare(strict_types=1);
+
+namespace MyPlugin\Event;
+
+use Shopware\Core\Framework\Context;
+use Shopware\Core\Framework\Event\EventData\EventDataCollection;
+use Shopware\Core\Framework\Event\EventData\ScalarValueType;
+use Shopware\Core\Framework\Event\FlowEventAware;
+use Shopware\Core\Framework\Event\ShopwareEvent;
+use Symfony\Contracts\EventDispatcher\Event;
+
+class BlogPostPublishedEvent extends Event implements ShopwareEvent, FlowEventAware
+{
+    final public const EVENT_NAME = 'my_plugin.blog_post.published';
+
+    public function __construct(
+        private readonly string $blogPostId,
+        private readonly Context $context
+    ) {}
+
+    public function getName(): string
+    {
+        return self::EVENT_NAME;
+    }
+
+    public function getContext(): Context
+    {
+        return $this->context;
+    }
+
+    public static function getAvailableData(): EventDataCollection
+    {
+        return (new EventDataCollection())
+            ->add('blogPostId', new ScalarValueType(ScalarValueType::TYPE_STRING));
+    }
+}
+```
+
+## Events vs. hooks
+
+| | Events | Hooks |
+|--|--------|-------|
+| **Used by** | Plugins (PHP on-server) | Apps (external server) |
+| **Execution** | Synchronous, in-process | Synchronous via App Scripts (Twig in-process) or async via webhooks |
+| **Access to services** | Full DI container access | Limited to services exposed through the hook's `HookServiceFactory` |
+| **Code language** | PHP | Twig (App Scripts) |
+| **Registration** | `kernel.event_subscriber` tag | `app/scripts/<hook-name>/` directory in the app |
+
+<Note>
+Apps that need to run logic synchronously inside a Shopware request use **App Scripts** — server-side Twig files executed within the Shopware process. App Scripts fire through the hook system, which is the app equivalent of an event subscriber.
+</Note>
+
+### App Script example
+
+An app script for the `product-page-loaded` hook lives at:
+
+```
+Resources/app/scripts/product-page-loaded/enrich-product.twig
+```
+
+```twig
+{% set product = hook.page.product %}
+{% set customData = services.repository.search('my_entity', criteria) %}
+{% do hook.page.addExtension('myPlugin', customData) %}
+```
+
+The hook is dispatched at controller level, and each registered app script executes in sequence. This mirrors what a PHP event subscriber would do for a plugin.
+
+## Best practices
+
+<AccordionGroup>
+  <Accordion title="Pass IDs, not entities, in events">
+    The coding guidelines recommend passing only the primary key in events rather than the full entity object. This keeps events serializable for async processing and prevents accidental entity mutation across subscribers.
+
+    ```php
+    // Preferred
+    class BlogPostPublishedEvent extends Event
+    {
+        public function __construct(
+            private readonly string $blogPostId, // just the ID
+            private readonly Context $context
+        ) {}
+    }
+
+    // Avoid passing the full entity unless the subscriber cannot reasonably load it
+    ```
+  </Accordion>
+  <Accordion title="Do not throw exceptions from subscribers">
+    Unless the event is designed to be aborting (like a `Before*` event that signals validation failure), subscribers should not throw exceptions. Throwing in a subscriber breaks all other subscribers for that event and the originating request.
+  </Accordion>
+  <Accordion title="Use post-filters for DAL events">
+    When subscribing to `EntityWrittenContainerEvent`, filter down to the specific entity and action you care about using `getEventByEntityName()`. Reacting to every entity write is expensive.
+  </Accordion>
+  <Accordion title="Prefer specific events over generic ones">
+    Subscribe to `CheckoutOrderPlacedEvent` rather than listening to `EntityWrittenContainerEvent` and checking for the `order` entity. Domain events carry richer context and are more stable across version upgrades.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+Use `EventDispatcherInterface` directly only when you need to fire your own events. Never instantiate `NestedEventDispatcher` or bypass the standard dispatcher — the DAL and other framework components rely on the event chain being consistent.
+</Tip>

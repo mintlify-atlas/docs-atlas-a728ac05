@@ -1,0 +1,332 @@
+---
+title: "Build Shopware Plugins with Symfony Bundles"
+description: "Create Shopware plugins as Symfony bundles with full framework access — register services, subscribe to events, add migrations, and decorate existing routes."
+---
+
+Plugins are the most powerful extension mechanism Shopware offers. A plugin is a Symfony bundle that Shopware loads directly into its kernel, giving you full access to the service container, the event system, the Data Abstraction Layer, and every other framework primitive. Use plugins when you need capabilities that Apps cannot provide: custom database tables, decorated services, new API endpoints, or deep storefront modifications.
+
+## The Plugin base class
+
+Every plugin extends `Shopware\Core\Framework\Plugin`, which itself extends Symfony's `Bundle`. The class lives at `src/Core/Framework/Plugin.php` and defines the lifecycle hooks Shopware calls during installation and management operations.
+
+```php
+<?php declare(strict_types=1);
+
+namespace Acme\MyPlugin;
+
+use Shopware\Core\Framework\Plugin;
+use Shopware\Core\Framework\Plugin\Context\InstallContext;
+use Shopware\Core\Framework\Plugin\Context\ActivateContext;
+use Shopware\Core\Framework\Plugin\Context\DeactivateContext;
+use Shopware\Core\Framework\Plugin\Context\UninstallContext;
+use Shopware\Core\Framework\Plugin\Context\UpdateContext;
+
+class AcmeMyPlugin extends Plugin
+{
+    public function install(InstallContext $installContext): void
+    {
+        // Runs once on first install.
+        // Migrations run automatically before this method.
+    }
+
+    public function postInstall(InstallContext $installContext): void
+    {
+        // Runs after install() completes.
+        // Use this for operations that depend on freshly-created data.
+    }
+
+    public function update(UpdateContext $updateContext): void
+    {
+        // Runs when the plugin version changes.
+        // $updateContext->getCurrentPluginVersion() gives the old version.
+    }
+
+    public function postUpdate(UpdateContext $updateContext): void
+    {
+    }
+
+    public function activate(ActivateContext $activateContext): void
+    {
+        // Runs every time the merchant activates the plugin.
+        // The container is rebuilt after this method when rebuildContainer() returns true.
+    }
+
+    public function deactivate(DeactivateContext $deactivateContext): void
+    {
+        // Runs every time the merchant deactivates the plugin.
+    }
+
+    public function uninstall(UninstallContext $uninstallContext): void
+    {
+        // Runs on uninstall. Check keepUserData() before removing tables.
+        if ($uninstallContext->keepUserData()) {
+            return;
+        }
+
+        // Drop plugin-specific tables here if needed.
+    }
+}
+```
+
+<Note>
+  `rebuildContainer()` returns `true` by default. Shopware rebuilds the DI container after activation and deactivation so your plugin's services become available immediately. Override it to return `false` only if you are certain your plugin registers no services.
+</Note>
+
+## Directory structure
+
+Shopware resolves paths by convention. A minimal plugin layout looks like this:
+
+```
+custom/plugins/AcmeMyPlugin/
+├── composer.json
+├── src/
+│   ├── AcmeMyPlugin.php          # Plugin entry class
+│   ├── Resources/
+│   │   ├── config/
+│   │   │   ├── services.xml      # DI service definitions
+│   │   │   └── routes.xml        # Route loader
+│   │   ├── views/                # Twig templates
+│   │   └── public/               # Static assets
+│   ├── Migration/
+│   │   └── Migration1700000000CreateAcmeTable.php
+│   └── Subscriber/
+│       └── OrderSubscriber.php
+└── tests/
+```
+
+The `composer.json` must declare the Shopware plugin extra:
+
+```json
+{
+    "name": "acme/my-plugin",
+    "type": "shopware-platform-plugin",
+    "autoload": {
+        "psr-4": {
+            "Acme\\MyPlugin\\": "src/"
+        }
+    },
+    "extra": {
+        "shopware-plugin-class": "Acme\\MyPlugin\\AcmeMyPlugin",
+        "label": {
+            "en-GB": "My Plugin",
+            "de-DE": "Mein Plugin"
+        }
+    }
+}
+```
+
+## Registering services
+
+Place a standard Symfony XML service definition at `src/Resources/config/services.xml`:
+
+```xml
+<?xml version="1.0" ?>
+<container xmlns="http://symfony.com/schema/dic/services"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://symfony.com/schema/dic/services
+               https://symfony.com/schema/dic/services/services-1.0.xsd">
+
+    <services>
+        <service id="Acme\MyPlugin\Subscriber\OrderSubscriber">
+            <argument type="service" id="order.repository"/>
+            <tag name="kernel.event_subscriber"/>
+        </service>
+
+        <service id="Acme\MyPlugin\Service\SyncService">
+            <argument type="service" id="Shopware\Core\Framework\DataAbstractionLayer\EntityRepositoryInterface"/>
+        </service>
+    </services>
+
+</container>
+```
+
+## Event subscribers
+
+Shopware's event system covers virtually every business operation. Tag your subscriber with `kernel.event_subscriber` and implement `EventSubscriberInterface`:
+
+```php
+<?php declare(strict_types=1);
+
+namespace Acme\MyPlugin\Subscriber;
+
+use Shopware\Core\Checkout\Order\OrderEvents;
+use Shopware\Core\Framework\DataAbstractionLayer\Event\EntityWrittenEvent;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+
+class OrderSubscriber implements EventSubscriberInterface
+{
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            OrderEvents::ORDER_WRITTEN_EVENT => 'onOrderWritten',
+        ];
+    }
+
+    public function onOrderWritten(EntityWrittenEvent $event): void
+    {
+        foreach ($event->getWriteResults() as $result) {
+            // React to every order write operation.
+            $orderId = $result->getPrimaryKey();
+            // ... sync to external system, dispatch a message, etc.
+        }
+    }
+}
+```
+
+<Tip>
+  Prefer `EntityWrittenEvent` over loading entities in the subscriber. The write result already contains the payload that was persisted, so you avoid an extra database round-trip.
+</Tip>
+
+## Database migrations
+
+Shopware discovers migrations by scanning the namespace returned by `getMigrationNamespace()`. The default is `{PluginNamespace}\Migration`. Create timestamped migration classes:
+
+```php
+<?php declare(strict_types=1);
+
+namespace Acme\MyPlugin\Migration;
+
+use Doctrine\DBAL\Connection;
+use Shopware\Core\Framework\Migration\MigrationStep;
+
+class Migration1700000000CreateAcmeSyncLogTable extends MigrationStep
+{
+    public function getCreationTimestamp(): int
+    {
+        return 1700000000;
+    }
+
+    public function update(Connection $connection): void
+    {
+        $connection->executeStatement('
+            CREATE TABLE IF NOT EXISTS `acme_sync_log` (
+                `id`         BINARY(16)   NOT NULL,
+                `order_id`   BINARY(16)   NOT NULL,
+                `status`     VARCHAR(64)  NOT NULL,
+                `created_at` DATETIME(3)  NOT NULL,
+                `updated_at` DATETIME(3)  NULL,
+                PRIMARY KEY (`id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        ');
+    }
+
+    public function updateDestructive(Connection $connection): void
+    {
+        // Only irreversible changes go here (e.g. DROP COLUMN).
+    }
+}
+```
+
+Run pending migrations manually during development:
+
+```bash
+bin/console database:migrate AcmeMyPlugin --all
+```
+
+## Decorating services
+
+Use Symfony's decorator pattern to wrap an existing service without replacing it:
+
+```xml
+<service id="Acme\MyPlugin\Decorator\CustomProductRoute"
+         decorates="Shopware\Core\Content\Product\SalesChannel\Detail\ProductDetailRoute">
+    <argument type="service"
+              id="Acme\MyPlugin\Decorator\CustomProductRoute.inner"/>
+</service>
+```
+
+```php
+<?php declare(strict_types=1);
+
+namespace Acme\MyPlugin\Decorator;
+
+use Shopware\Core\Content\Product\SalesChannel\Detail\AbstractProductDetailRoute;
+use Shopware\Core\Content\Product\SalesChannel\Detail\ProductDetailRouteResponse;
+use Shopware\Core\System\SalesChannel\SalesChannelContext;
+use Symfony\Component\HttpFoundation\Request;
+
+class CustomProductRoute extends AbstractProductDetailRoute
+{
+    public function __construct(
+        private readonly AbstractProductDetailRoute $inner
+    ) {
+    }
+
+    public function getDecorated(): AbstractProductDetailRoute
+    {
+        return $this->inner;
+    }
+
+    public function load(
+        string $productId,
+        Request $request,
+        SalesChannelContext $context
+    ): ProductDetailRouteResponse {
+        $response = $this->inner->load($productId, $request, $context);
+
+        // Augment the response before it reaches the template.
+        return $response;
+    }
+}
+```
+
+## Enriching Admin ACL privileges
+
+Plugins can extend the Administration's privilege system by overriding `enrichPrivileges()`:
+
+```php
+public function enrichPrivileges(): array
+{
+    return [
+        'order.viewer' => [
+            'acme_sync_log:read',
+        ],
+        'order.editor' => [
+            'acme_sync_log:create',
+            'acme_sync_log:update',
+        ],
+    ];
+}
+```
+
+## Building your first plugin
+
+<Steps>
+  <Step title="Scaffold the directory">
+    ```bash
+    mkdir -p custom/plugins/AcmeMyPlugin/src/Resources/config
+    mkdir -p custom/plugins/AcmeMyPlugin/src/Migration
+    mkdir -p custom/plugins/AcmeMyPlugin/src/Subscriber
+    ```
+  </Step>
+
+  <Step title="Create composer.json and the Plugin class">
+    Write `composer.json` with the `shopware-platform-plugin` type and create `src/AcmeMyPlugin.php` extending `Shopware\Core\Framework\Plugin`.
+  </Step>
+
+  <Step title="Add a migration">
+    Create a `Migration{timestamp}` class in `src/Migration/`. Run `bin/console database:migrate AcmeMyPlugin --all` to apply it.
+  </Step>
+
+  <Step title="Register services">
+    Create `src/Resources/config/services.xml`. Define your services and add the `kernel.event_subscriber` tag to any subscriber class.
+  </Step>
+
+  <Step title="Install and activate">
+    ```bash
+    bin/console plugin:refresh
+    bin/console plugin:install AcmeMyPlugin --activate
+    ```
+  </Step>
+
+  <Step title="Verify">
+    ```bash
+    bin/console plugin:list
+    # AcmeMyPlugin should appear as active.
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Never prefix your migration namespace with `shopware` (case-insensitive). Shopware blocks deletion of migrations in namespaces that start with `shopware` to protect core data — your plugin uninstall will fail to clean up if you do.
+</Warning>

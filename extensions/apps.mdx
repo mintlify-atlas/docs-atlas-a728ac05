@@ -1,0 +1,247 @@
+---
+title: "Build Shopware Apps with the App System"
+description: "Create lightweight, cloud-compatible Shopware extensions using manifest.xml, webhooks, App Scripts, and iframe admin modules — no Symfony bundle required."
+---
+
+The Shopware App System lets you extend the platform without shipping PHP code to the server. Apps communicate with Shopware over HTTP, declare their capabilities in a single `manifest.xml` file, and run on infrastructure you fully control. This makes them the right choice for SaaS integrations, marketplace extensions, and any scenario where you want clean separation between your service and the Shopware instance.
+
+## How apps work
+
+When Shopware installs your app it performs a handshake with your `registrationUrl`, exchanges a shared secret, and then calls your declared webhook endpoints whenever matching events occur. Every request Shopware sends is signed with an HMAC-SHA256 signature so you can verify authenticity on your side.
+
+The `AppEntity` tracks all runtime state: `name`, `version`, `active`, `appSecret`, `webhooks`, `modules`, `flowActions`, `flowEvents`, `templates`, `scripts`, and `allowedHosts`. Understanding these fields helps you reason about what Shopware persists after installation.
+
+## manifest.xml structure
+
+The manifest is the single source of truth for your app. Place it at the root of your app directory.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/shopware/trunk/src/Core/Framework/App/Manifest/Schema/manifest-2.0.xsd">
+
+    <meta>
+        <name>MyIntegration</name>
+        <label>My Integration</label>
+        <label lang="de-DE">Meine Integration</label>
+        <description>Connects Shopware to the MyIntegration platform.</description>
+        <author>Acme GmbH</author>
+        <copyright>(c) 2024 Acme GmbH</copyright>
+        <version>1.0.0</version>
+        <icon>Resources/config/plugin.png</icon>
+        <license>MIT</license>
+    </meta>
+
+    <setup>
+        <registrationUrl>https://my-integration.example.com/shopware/register</registrationUrl>
+        <secret>my-local-dev-secret</secret>
+    </setup>
+
+    <permissions>
+        <read>order</read>
+        <read>customer</read>
+        <create>order_tag</create>
+        <update>order</update>
+    </permissions>
+
+    <allowed-hosts>
+        <host>my-integration.example.com</host>
+    </allowed-hosts>
+
+    <webhooks>
+        <webhook name="orderPlaced"
+                 url="https://my-integration.example.com/webhooks/order-placed"
+                 event="checkout.order.placed"/>
+        <webhook name="appDeleted"
+                 url="https://my-integration.example.com/webhooks/app-deleted"
+                 event="app.deleted"/>
+    </webhooks>
+
+    <admin>
+        <action-button action="doSync"
+                       entity="order"
+                       view="detail"
+                       url="https://my-integration.example.com/actions/order-sync">
+            <label>Sync to MyIntegration</label>
+        </action-button>
+
+        <module name="dashboard"
+                parent="sw-order"
+                source="https://my-integration.example.com/admin/dashboard"
+                position="50">
+            <label>MyIntegration</label>
+        </module>
+    </admin>
+
+</manifest>
+```
+
+<Note>
+  The `<secret>` element is only used during local development to skip the registration handshake. Remove it before publishing to the Shopware Store — the store injects the secret automatically.
+</Note>
+
+## Permissions
+
+Permissions follow the pattern `<verb>entity_name</verb>`. The available verbs map directly to Shopware's ACL system:
+
+| Verb | Effect |
+|------|--------|
+| `read` | `entity:read` privilege |
+| `create` | `entity:create` privilege |
+| `update` | `entity:update` privilege |
+| `delete` | `entity:delete` privilege |
+
+Your app's integration receives an ACL role whose privileges exactly match the declared permissions. The `AppEntity::getRequestedPrivileges()` method returns the full list at runtime.
+
+<Warning>
+  Request only the permissions your app genuinely needs. Shopware displays the full permission list to merchants during installation, and excessive permissions reduce trust.
+</Warning>
+
+## Webhooks
+
+Shopware delivers webhook payloads as `POST` requests with three headers you must validate:
+
+- `shopware-app-signature` — HMAC-SHA256 of the raw request body, keyed with your app secret
+- `sw-version` — the Shopware version that sent the event
+- `sw-context-language` — the language context
+
+```php
+// Verify the incoming webhook signature
+$signature = hash_hmac('sha256', $rawBody, $appSecret);
+
+if (!hash_equals($signature, $request->headers->get('shopware-app-signature'))) {
+    return new Response('', Response::HTTP_UNAUTHORIZED);
+}
+```
+
+Common event names to subscribe to:
+
+```xml
+<webhook name="orderPlaced"    event="checkout.order.placed"       url="..."/>
+<webhook name="customerReg"    event="customer.written"            url="..."/>
+<webhook name="productUpdated" event="product.written"             url="..."/>
+<webhook name="appInstalled"   event="app.installed"               url="..."/>
+<webhook name="appUpdated"     event="app.updated"                 url="..."/>
+<webhook name="appDeleted"     event="app.deleted"                 url="..."/>
+```
+
+## App Scripts (server-side Twig)
+
+App Scripts run directly inside Shopware's PHP process via a sandboxed Twig environment — no HTTP round-trip required. They are ideal for performance-sensitive logic such as custom pricing, cart manipulation, or enriching API responses.
+
+Place scripts under `Resources/scripts/{hook-name}/` in your app directory:
+
+```
+MyIntegration/
+└── Resources/
+    └── scripts/
+        ├── cart/
+        │   └── cart.twig          # Runs on every cart calculation
+        ├── product-page-loaded/
+        │   └── enrich.twig        # Enriches product page data
+        └── api-customer-route/
+            └── hook.twig          # Extends the Store API customer route
+```
+
+A cart script example that adds a surcharge for orders under a threshold:
+
+```twig
+{% if cart.price.totalPrice < 50 %}
+    {% set surcharge = services.cart.surcharge(
+        'small-order-fee',
+        'percentage',
+        5,
+        'Small order surcharge'
+    ) %}
+    {% do cart.adds(surcharge) %}
+{% endif %}
+```
+
+<Tip>
+  Scripts have access to `services.repository` for read-only DAL queries and `services.config` to read your app's configuration values. Write operations must go through your backend via webhooks.
+</Tip>
+
+## Admin modules via iframe
+
+Admin modules embed your web app inside the Shopware administration using a sandboxed `<iframe>`. Shopware injects an auth token into the iframe URL so your page can call the Admin API on behalf of the current user.
+
+```xml
+<admin>
+    <module name="main-module"
+            parent="sw-catalogue"
+            source="https://my-integration.example.com/admin"
+            position="100">
+        <label>MyIntegration</label>
+        <label lang="de-DE">MeineIntegration</label>
+    </module>
+</admin>
+```
+
+The `source` URL receives these query parameters automatically:
+
+| Parameter | Value |
+|-----------|-------|
+| `shop-id` | Unique shop identifier |
+| `shop-url` | Base URL of the Shopware instance |
+| `timestamp` | Unix timestamp of the request |
+| `sw-version` | Shopware version |
+| `shopware-app-signature` | HMAC signature for verification |
+
+## App lifecycle
+
+Shopware calls lifecycle endpoints on your `registrationUrl` base path during key events. Implement these routes to react to state changes:
+
+<CardGroup cols={2}>
+  <Card title="app.installed" icon="download">
+    Fired once after the initial installation handshake completes. Use this to provision resources for the new shop.
+  </Card>
+  <Card title="app.updated" icon="arrows-rotate">
+    Fired after a merchant updates the app version. The payload includes the old and new version strings.
+  </Card>
+  <Card title="app.deleted" icon="trash">
+    Fired when the merchant uninstalls the app. Clean up all shop-specific data here.
+  </Card>
+  <Card title="app.activated / app.deactivated" icon="toggle-on">
+    Fired when the merchant toggles the active state without a full uninstall.
+  </Card>
+</CardGroup>
+
+## Building your first app
+
+<Steps>
+  <Step title="Create the directory structure">
+    ```bash
+    mkdir -p MyIntegration/Resources/scripts/cart
+    touch MyIntegration/manifest.xml
+    ```
+  </Step>
+
+  <Step title="Write the manifest">
+    Add the `<meta>`, `<setup>`, `<permissions>`, and `<webhooks>` blocks shown above. Set `registrationUrl` to a locally reachable URL (use ngrok or a similar tunnel during development).
+  </Step>
+
+  <Step title="Implement the registration endpoint">
+    ```php
+    // POST /shopware/register
+    // Shopware sends: shop-id, shop-url, timestamp, shopware-app-signature
+    $proof = hash_hmac('sha256', $shopId . $shopUrl . $appName, $appSecret);
+
+    return new JsonResponse([
+        'proof'              => $proof,
+        'secret'             => $generatedShopSecret,  // store this per shop
+        'confirmation_url'   => 'https://my-integration.example.com/shopware/confirm',
+    ]);
+    ```
+  </Step>
+
+  <Step title="Install the app into Shopware">
+    ```bash
+    # Copy your app to the custom/apps directory, then run:
+    bin/console app:install MyIntegration --activate
+    ```
+  </Step>
+
+  <Step title="Verify with the lifecycle webhook">
+    Check that Shopware hits your `app.installed` webhook endpoint. Inspect the `shopware-app-signature` header to confirm the secret exchange succeeded.
+  </Step>
+</Steps>

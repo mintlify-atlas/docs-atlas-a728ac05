@@ -1,24 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Shopware",
+  "projectType": "framework",
+  "projectName": "Shopware",
+  "projectDescription": "An open-source, API-first e-commerce framework built on Symfony and Vue.js, offering a full-featured shop platform alongside a powerful extension system via plugins and apps.",
   "theme": "maple",
-  "colors": {
-    "primary": "#040404",
-    "light": "#1b9cfc",
-    "dark": "#72c3fc"
-  },
-  "favicon": "https://media.brand.dev/1f0cfd84-8b0b-455d-8a96-68e646d93a4d.png",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/shopware/shopware"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/shopware/shopware"
-    }
-  },
+  "primaryColor": "#040404",
+  "lightColor": "#1b9cfc",
+  "darkColor": "#72c3fc",
   "navigation": {
     "tabs": [
       {
@@ -104,5 +91,30 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "API-first architecture with three distinct APIs: Admin API, Store API, and Sync API",
+    "Custom Data Abstraction Layer (DAL) with Criteria-based querying — no Doctrine ORM",
+    "Powerful extension system: Apps (cloud-ready, lightweight) and Plugins (full Symfony bundles)",
+    "Flow Builder for event-driven business process automation without code",
+    "Twig-based Storefront with Bootstrap 5 and full theme system",
+    "Vue 3 + TypeScript Admin panel with component library",
+    "CMS system (Shopping Experiences) for building content pages",
+    "Elasticsearch/OpenSearch integration for scalable product search",
+    "Rule-based conditions engine for pricing, shipping, and promotions",
+    "Multi-channel (Sales Channel) support for different storefronts and languages"
+  ],
+  "publicApiSurface": [
+    "GET/POST /api/ — Admin REST API (CRUD for all entities)",
+    "GET/POST /store-api/ — Customer-facing Store API",
+    "POST /api/_action/sync — Bulk Sync API",
+    "EntityRepository — DAL repository for reading/writing entities",
+    "Criteria — Query builder for DAL searches",
+    "EntityDefinition — Schema definition for custom entities",
+    "EventSubscriberInterface — Hook into Shopware events",
+    "Plugin base class (Shopware\\Core\\Framework\\Plugin) — Plugin lifecycle hooks",
+    "AbstractRoute — Decoration pattern for Store API routes",
+    "AppManifest (manifest.xml) — App configuration and permissions",
+    "bin/console — CLI commands (e.g., plugin:install, dal:migrate)"
+  ]
 }

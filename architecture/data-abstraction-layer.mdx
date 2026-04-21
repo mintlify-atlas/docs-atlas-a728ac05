@@ -1,0 +1,533 @@
+---
+title: "Data Abstraction Layer (DAL)"
+description: "How Shopware's custom ORM replacement works: EntityDefinition, EntityRepository, the Criteria API, field types, and writing or reading entities."
+---
+
+Shopware does not use Doctrine ORM. Instead it ships a custom Data Abstraction Layer (DAL) that provides a PHP-first schema definition system, a fluent query API, and a repository pattern for all database access. This page explains why the DAL exists, how its core classes relate to each other, and how to use it to define custom entities and run queries.
+
+## Why the DAL instead of Doctrine ORM
+
+Doctrine ORM maps PHP objects to tables through annotations or XML and generates SQL from entity graphs. Shopware's requirements went beyond what that model handles well:
+
+- **Translations** — every translatable field must resolve through a language inheritance chain at query time, not in PHP after a fetch.
+- **Versioning** — entities can exist in multiple versions (e.g., product drafts) and must be queryable per version.
+- **Inheritance** — variant products inherit field values from their parent unless explicitly overridden; the DAL resolves this in SQL.
+- **Extensions** — plugins add fields to existing entities without touching the original class. The DAL merges extension fields transparently.
+- **Aggregations and Elasticsearch** — the `Criteria` API translates identically to both MySQL queries and Elasticsearch DSL, enabling search backend switching without changing application code.
+
+The DAL uses Doctrine **DBAL** (the low-level SQL abstraction) but builds its own query generation, hydration, and write pipeline on top.
+
+## Core classes
+
+| Class | Responsibility |
+|-------|---------------|
+| `EntityDefinition` | Declares the entity name, field set, and related entity classes |
+| `EntityRepository` | Read and write gateway; dispatches events on every operation |
+| `Criteria` | Immutable query descriptor: filters, sorts, aggregations, associations |
+| `DefinitionInstanceRegistry` | Service locator for all registered definitions |
+| `FieldCollection` | Typed collection of `Field` instances that compiles to a `CompiledFieldCollection` |
+
+## EntityDefinition
+
+`EntityDefinition` is the schema declaration for one entity. You subclass it, implement `getEntityName()` and `defineFields()`, and register it as a service tagged `shopware.entity.definition`.
+
+```php
+<?php declare(strict_types=1);
+
+namespace MyPlugin\Content\BlogPost;
+
+use Shopware\Core\Framework\DataAbstractionLayer\EntityDefinition;
+use Shopware\Core\Framework\DataAbstractionLayer\Field\Flag\ApiAware;
+use Shopware\Core\Framework\DataAbstractionLayer\Field\Flag\PrimaryKey;
+use Shopware\Core\Framework\DataAbstractionLayer\Field\Flag\Required;
+use Shopware\Core\Framework\DataAbstractionLayer\Field\IdField;
+use Shopware\Core\Framework\DataAbstractionLayer\Field\StringField;
+use Shopware\Core\Framework\DataAbstractionLayer\Field\TranslatedField;
+use Shopware\Core\Framework\DataAbstractionLayer\Field\TranslationsAssociationField;
+use Shopware\Core\Framework\DataAbstractionLayer\FieldCollection;
+
+class BlogPostDefinition extends EntityDefinition
+{
+    final public const ENTITY_NAME = 'blog_post';
+
+    public function getEntityName(): string
+    {
+        return self::ENTITY_NAME;
+    }
+
+    public function getEntityClass(): string
+    {
+        return BlogPostEntity::class;
+    }
+
+    public function getCollectionClass(): string
+    {
+        return BlogPostCollection::class;
+    }
+
+    protected function defineFields(): FieldCollection
+    {
+        return new FieldCollection([
+            (new IdField('id', 'id'))
+                ->addFlags(new ApiAware(), new PrimaryKey(), new Required()),
+
+            (new StringField('author', 'author'))
+                ->addFlags(new ApiAware(), new Required()),
+
+            (new TranslatedField('title'))
+                ->addFlags(new ApiAware()),
+
+            (new TranslationsAssociationField(
+                BlogPostTranslationDefinition::class,
+                'blog_post_id'
+            ))->addFlags(new Required()),
+        ]);
+    }
+}
+```
+
+<Note>
+The first argument to field constructors is the **storage name** (database column), and the second is the **property name** (PHP property). The DAL maps between them automatically.
+</Note>
+
+The `defaultFields()` method in the base class automatically appends `createdAt` and `updatedAt` fields with the `ApiAware` flag — you do not need to declare them yourself.
+
+### Real-world example: ProductDefinition
+
+The built-in `ProductDefinition` (`src/Core/Content/Product/ProductDefinition.php`) shows all field types in practice. A condensed excerpt:
+
+```php
+protected function defineFields(): FieldCollection
+{
+    return new FieldCollection([
+        (new IdField('id', 'id'))
+            ->addFlags(new ApiAware(), new PrimaryKey(), new Required()),
+        (new VersionField())->addFlags(new ApiAware()),
+        (new ParentFkField(self::class))->addFlags(new ApiAware()),
+
+        (new PriceField('price', 'price'))
+            ->addFlags(new Inherited(), new Required()),
+
+        (new StringField('product_number', 'productNumber'))
+            ->addFlags(new ApiAware(), new Required()),
+
+        (new BoolField('active', 'active'))
+            ->addFlags(new ApiAware(), new Inherited()),
+
+        (new IntField('stock', 'stock'))
+            ->addFlags(new ApiAware(), new Required()),
+
+        // Translated fields proxy to the translation definition
+        (new TranslatedField('name'))
+            ->addFlags(new ApiAware(), new Inherited()),
+
+        (new TranslatedField('description'))
+            ->addFlags(new ApiAware(), new Inherited()),
+
+        // Associations
+        (new ManyToOneAssociationField('tax', 'tax_id', TaxDefinition::class, 'id'))
+            ->addFlags(new ApiAware(), new Inherited()),
+
+        (new OneToManyAssociationField('media', ProductMediaDefinition::class, 'product_id'))
+            ->addFlags(new ApiAware(), new CascadeDelete()),
+
+        (new ManyToManyAssociationField(
+            'categories',
+            CategoryDefinition::class,
+            ProductCategoryDefinition::class,
+            'product_id',
+            'category_id'
+        ))->addFlags(new ApiAware(), new Inherited()),
+
+        (new TranslationsAssociationField(ProductTranslationDefinition::class, 'product_id'))
+            ->addFlags(new ApiAware(), new Inherited(), new Required()),
+    ]);
+}
+```
+
+## Field types
+
+<AccordionGroup>
+  <Accordion title="Scalar fields">
+    | Field class | Storage type | Notes |
+    |-------------|--------------|-------|
+    | `IdField` | `BINARY(16)` | UUID stored as binary, serialized as hex string |
+    | `StringField` | `VARCHAR(255)` | |
+    | `LongTextField` | `LONGTEXT` | |
+    | `IntField` | `INT` | |
+    | `FloatField` | `DOUBLE` | |
+    | `BoolField` | `TINYINT(1)` | |
+    | `DateTimeField` | `DATETIME(3)` | |
+    | `JsonField` | `JSON` | Nested fields supported via child field definitions |
+    | `PriceField` | `JSON` | Stores gross/net prices per currency |
+    | `EmailField` | `VARCHAR(255)` | Normalized to lowercase |
+    | `PasswordField` | `VARCHAR(255)` | Hashed on write |
+  </Accordion>
+  <Accordion title="Relation fields">
+    | Field class | Cardinality | Notes |
+    |-------------|-------------|-------|
+    | `FkField` | Foreign key scalar | Stores the raw UUID; pair with an association field |
+    | `ManyToOneAssociationField` | N→1 | Eager or lazy loaded |
+    | `OneToManyAssociationField` | 1→N | Returns a collection |
+    | `OneToOneAssociationField` | 1→1 | |
+    | `ManyToManyAssociationField` | N→M | Requires a mapping definition |
+    | `ManyToManyIdField` | N→M scalar | Returns array of IDs without loading entities |
+  </Accordion>
+  <Accordion title="Special fields">
+    | Field class | Purpose |
+    |-------------|---------|
+    | `TranslatedField` | Proxy to the translation definition; resolves per language chain |
+    | `TranslationsAssociationField` | Declares the translation association |
+    | `VersionField` | Marks the entity as version-aware |
+    | `AutoIncrementField` | Auto-increment integer for human-readable ordering |
+    | `ChildCountField` | Write-protected count of child records |
+    | `CreatedAtField` / `UpdatedAtField` | Added automatically by `defaultFields()` |
+  </Accordion>
+  <Accordion title="Field flags">
+    Flags modify field behavior and are added with `->addFlags(...)`.
+
+    | Flag | Effect |
+    |------|--------|
+    | `PrimaryKey` | Marks the field as part of the primary key |
+    | `Required` | Validates that the field has a non-null value on write |
+    | `ApiAware` | Exposes the field through the Admin and Store APIs |
+    | `Inherited` | Value falls back to the parent entity if not set on the variant |
+    | `CascadeDelete` | Deletes associated records when the owner is deleted |
+    | `SetNullOnDelete` | Nulls the FK instead of deleting |
+    | `WriteProtected` | Prevents direct writes; computed by the system |
+    | `Runtime` | Field value is computed in PHP, not stored in the database |
+    | `SearchRanking` | Weights the field in full-text search scoring |
+  </Accordion>
+</AccordionGroup>
+
+## EntityRepository
+
+`EntityRepository` is the single entry point for all read and write operations on one entity type. You inject the typed repository using the service id `<entity_name>.repository`.
+
+```yaml
+# services.xml
+<service id="MyPlugin\Content\BlogPost\BlogPostController">
+    <argument type="service" id="blog_post.repository"/>
+</service>
+```
+
+### Reading entities
+
+```php
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Sorting\FieldSorting;
+
+// search() returns EntitySearchResult containing a typed EntityCollection
+$criteria = new Criteria();
+$criteria->addFilter(new EqualsFilter('active', true));
+$criteria->addSorting(new FieldSorting('productNumber', FieldSorting::ASCENDING));
+$criteria->setLimit(25);
+$criteria->setOffset(0);
+$criteria->addAssociation('categories');
+
+$result = $this->productRepository->search($criteria, $context);
+
+foreach ($result as $product) {
+    echo $product->getProductNumber();
+}
+```
+
+`searchIds()` returns only the UUIDs and is faster when you only need IDs:
+
+```php
+$ids = $this->productRepository->searchIds($criteria, $context);
+// $ids->getIds() => ['abc123...', 'def456...']
+```
+
+### Writing entities
+
+All write methods accept an array of payload arrays and return an `EntityWrittenContainerEvent` that carries the written IDs.
+
+<CodeGroup>
+
+```php create.php
+$this->blogPostRepository->create([
+    [
+        'id'     => Uuid::randomHex(),
+        'author' => 'Jane Smith',
+        'translations' => [
+            'en-GB' => ['title' => 'First post'],
+            'de-DE' => ['title' => 'Erster Beitrag'],
+        ],
+    ],
+], $context);
+```
+
+```php update.php
+$this->blogPostRepository->update([
+    [
+        'id'     => $existingId,
+        'author' => 'Jane Smith (updated)',
+    ],
+], $context);
+```
+
+```php upsert.php
+// Creates or updates based on whether the ID exists
+$this->blogPostRepository->upsert([
+    [
+        'id'     => $id,
+        'author' => 'Jane Smith',
+    ],
+], $context);
+```
+
+```php delete.php
+$this->blogPostRepository->delete([
+    ['id' => $id],
+], $context);
+```
+
+</CodeGroup>
+
+<Warning>
+`update()` only modifies the fields you supply. It does not overwrite fields you omit. Use `upsert()` when you are unsure whether a record already exists.
+</Warning>
+
+### Versioning and cloning
+
+When an entity definition returns `true` from `isVersionAware()` (it declares a `VersionField`), you can create draft versions:
+
+```php
+// Create a draft copy of a product
+$versionId = $this->productRepository->createVersion($productId, $context);
+
+// Make edits against the draft version
+$draftContext = $context->createWithVersionId($versionId);
+$this->productRepository->update([['id' => $productId, 'name' => 'Draft name']], $draftContext);
+
+// Publish the draft back to the live version
+$this->productRepository->merge($versionId, $context);
+```
+
+## Criteria API
+
+`Criteria` is the query descriptor passed to every read operation. It is immutable in the sense that you build it up before passing it to the repository — the repository does not mutate it (it clones internally).
+
+### Filters
+
+```php
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\RangeFilter;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\ContainsFilter;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\MultiFilter;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\NotFilter;
+
+$criteria->addFilter(
+    new EqualsFilter('active', true),
+    new RangeFilter('stock', [RangeFilter::GTE => 1]),
+    new ContainsFilter('productNumber', 'SW-')
+);
+
+// Boolean logic
+$criteria->addFilter(
+    new MultiFilter(MultiFilter::CONNECTION_OR, [
+        new EqualsFilter('taxId', $taxId1),
+        new EqualsFilter('taxId', $taxId2),
+    ])
+);
+
+// Negation
+$criteria->addFilter(
+    new NotFilter(NotFilter::CONNECTION_AND, [
+        new EqualsFilter('active', false),
+    ])
+);
+```
+
+### Sorting
+
+```php
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Sorting\FieldSorting;
+
+$criteria->addSorting(
+    new FieldSorting('name', FieldSorting::ASCENDING),
+    new FieldSorting('createdAt', FieldSorting::DESCENDING)
+);
+```
+
+### Associations
+
+Associations are not loaded by default. You must declare them explicitly:
+
+```php
+// Load a single association
+$criteria->addAssociation('manufacturer');
+
+// Load a nested path
+$criteria->addAssociation('cover.media');
+
+// Load multiple paths at once
+$criteria->addAssociations(['categories', 'tags', 'prices']);
+
+// Filter within an association
+$criteria->getAssociation('media')
+    ->addSorting(new FieldSorting('position', FieldSorting::ASCENDING));
+```
+
+### Aggregations
+
+```php
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Aggregation\Metric\CountAggregation;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Aggregation\Metric\AvgAggregation;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Aggregation\Metric\SumAggregation;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Aggregation\Bucket\TermsAggregation;
+
+$criteria->addAggregation(new CountAggregation('product-count', 'id'));
+$criteria->addAggregation(new AvgAggregation('avg-price', 'price'));
+$criteria->addAggregation(new TermsAggregation('by-manufacturer', 'manufacturerId'));
+
+$result = $this->productRepository->search($criteria, $context);
+
+$count = $result->getAggregations()->get('product-count')->getCount();
+```
+
+### Total count modes
+
+```php
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+
+// No total count — fastest, use when pagination is not needed
+$criteria->setTotalCountMode(Criteria::TOTAL_COUNT_MODE_NONE);
+
+// Exact count — use when you need to know the exact number of pages
+$criteria->setTotalCountMode(Criteria::TOTAL_COUNT_MODE_EXACT);
+
+// Next-page count — fetches limit * 5 + 1, use for "load more" UIs
+$criteria->setTotalCountMode(Criteria::TOTAL_COUNT_MODE_NEXT_PAGES);
+```
+
+### Full-text search
+
+```php
+$criteria->setTerm('bluetooth headphones');
+```
+
+When Elasticsearch is enabled, the term is sent to the search index. Otherwise it falls back to a SQL `LIKE` query against fields flagged with `SearchRanking`.
+
+## Defining a custom entity
+
+<Steps>
+  <Step title="Create the entity class">
+    Extend `Entity` and declare your properties with getters and setters.
+
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Content\BlogPost;
+
+    use Shopware\Core\Framework\DataAbstractionLayer\Entity;
+    use Shopware\Core\Framework\DataAbstractionLayer\EntityIdTrait;
+
+    class BlogPostEntity extends Entity
+    {
+        use EntityIdTrait;
+
+        protected string $author;
+        protected ?string $title = null;
+
+        public function getAuthor(): string { return $this->author; }
+        public function setAuthor(string $author): void { $this->author = $author; }
+        public function getTitle(): ?string { return $this->title; }
+        public function setTitle(?string $title): void { $this->title = $title; }
+    }
+    ```
+  </Step>
+  <Step title="Create the collection class">
+    Extend `EntityCollection` and type the `current()` return.
+
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Content\BlogPost;
+
+    use Shopware\Core\Framework\DataAbstractionLayer\EntityCollection;
+
+    /**
+     * @extends EntityCollection<BlogPostEntity>
+     */
+    class BlogPostCollection extends EntityCollection
+    {
+        protected function getExpectedClass(): string
+        {
+            return BlogPostEntity::class;
+        }
+    }
+    ```
+  </Step>
+  <Step title="Create the EntityDefinition">
+    Declare the entity name, field set, and related classes as shown in the example above.
+  </Step>
+  <Step title="Register the definition">
+    Tag the definition service so Shopware's `DefinitionInstanceRegistry` picks it up.
+
+    ```xml
+    <!-- Resources/config/services.xml -->
+    <service id="MyPlugin\Content\BlogPost\BlogPostDefinition">
+        <tag name="shopware.entity.definition" entity="blog_post"/>
+    </service>
+    ```
+  </Step>
+  <Step title="Create a migration">
+    Add a migration that creates the corresponding database table.
+
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Migration;
+
+    use Doctrine\DBAL\Connection;
+    use Shopware\Core\Framework\Migration\MigrationStep;
+
+    class Migration1700000000BlogPost extends MigrationStep
+    {
+        public function getCreationTimestamp(): int
+        {
+            return 1700000000;
+        }
+
+        public function update(Connection $connection): void
+        {
+            $connection->executeStatement('
+                CREATE TABLE IF NOT EXISTS `blog_post` (
+                    `id`         BINARY(16) NOT NULL,
+                    `author`     VARCHAR(255) NOT NULL,
+                    `created_at` DATETIME(3) NOT NULL,
+                    `updated_at` DATETIME(3) NULL,
+                    PRIMARY KEY (`id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            ');
+        }
+
+        public function updateDestructive(Connection $connection): void {}
+    }
+    ```
+  </Step>
+</Steps>
+
+## DefinitionInstanceRegistry
+
+`DefinitionInstanceRegistry` is the central registry of all entity definitions. You can retrieve a definition or repository by entity name or class name:
+
+```php
+use Shopware\Core\Framework\DataAbstractionLayer\DefinitionInstanceRegistry;
+
+// Retrieve by entity name
+$definition = $registry->getByEntityName('product');
+
+// Retrieve a repository by entity name
+$repository = $registry->getRepository('product');
+
+// Retrieve by class name
+$definition = $registry->getByClassOrEntityName(ProductDefinition::class);
+```
+
+<Tip>
+In most cases you should inject the specific repository directly (e.g., `product.repository`) rather than going through the registry. Use the registry only when you need to work with entity names dynamically.
+</Tip>

@@ -1,0 +1,264 @@
+---
+title: "Store API: checkout and order placement"
+description: "Complete a Shopware purchase via the Store API: authenticate, select shipping and payment, place the order, and handle payment redirects."
+---
+
+Completing a purchase through the Store API follows a linear flow: authenticate (or proceed as a guest), choose a shipping method and payment method, place the order, and then handle any payment redirect. All steps share the same `sw-context-token` that was established during cart management.
+
+<Info>
+  You must hold a valid `sw-context-token` with a non-empty cart before starting checkout. See [cart management](/api/store/cart) for how to create a cart and receive a token.
+</Info>
+
+---
+
+## Checkout flow
+
+<Steps>
+
+<Step title="Authenticate the customer">
+
+Registered customers log in with their credentials. Guest customers skip this step and proceed with the current context token.
+
+`POST /store-api/account/login`
+
+<CodeGroup>
+
+```bash customer login
+curl -X POST https://your-store.example.com/store-api/account/login \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "customer@example.com",
+    "password": "s3cr3tP@ss"
+  }'
+```
+
+```json response
+{
+  "contextToken": "NEW-MERGED-TOKEN..."
+}
+```
+
+</CodeGroup>
+
+<Warning>
+  After login, Shopware returns a **new** context token. Replace your stored token with this value — the guest cart is merged into the customer cart automatically.
+</Warning>
+
+For guest checkout, skip this step entirely. The order endpoint accepts a `guest` flag and inline customer data.
+
+</Step>
+
+<Step title="Select a shipping method">
+
+Retrieve available shipping methods to present to the customer.
+
+`GET /store-api/shipping-method`
+
+<CodeGroup>
+
+```bash list shipping methods
+curl "https://your-store.example.com/store-api/shipping-method?onlyAvailable=1" \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here"
+```
+
+```json response
+{
+  "total": 2,
+  "elements": [
+    {
+      "id": "shipping-method-uuid",
+      "name": "Standard Shipping",
+      "deliveryTime": { "name": "3-5 days" },
+      "price": [{ "currencyPrice": [{ "gross": 4.99 }] }]
+    }
+  ]
+}
+```
+
+</CodeGroup>
+
+Store the chosen `id` — you will pass it when placing the order or updating the sales channel context.
+
+</Step>
+
+<Step title="Select a payment method">
+
+Retrieve available payment methods.
+
+`GET /store-api/payment-method`
+
+<CodeGroup>
+
+```bash list payment methods
+curl "https://your-store.example.com/store-api/payment-method?onlyAvailable=1" \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here"
+```
+
+```json response
+{
+  "total": 3,
+  "elements": [
+    {
+      "id": "payment-method-uuid",
+      "name": "Credit Card",
+      "shortName": "payment_creditcard",
+      "synchronous": false
+    },
+    {
+      "id": "invoice-uuid",
+      "name": "Invoice",
+      "shortName": "payment_invoice",
+      "synchronous": true
+    }
+  ]
+}
+```
+
+</CodeGroup>
+
+`synchronous: true` means the payment is resolved immediately (e.g. invoice). `synchronous: false` means a redirect or async confirmation is required — handle this in step 5.
+
+</Step>
+
+<Step title="Place the order">
+
+Submit the cart as an order.
+
+`POST /store-api/checkout/order`
+
+<ParamField body="customerComment" type="string">
+  Optional note from the customer attached to the order.
+</ParamField>
+
+For **guest checkout**, include a nested `billingAddress` object and set `guest: true` in the customer data. The full schema is available in the [Shopware Store API reference](https://shopware.stoplight.io/docs/store-api).
+
+<CodeGroup>
+
+```bash place order (logged-in customer)
+curl -X POST https://your-store.example.com/store-api/checkout/order \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerComment": "Please leave at door."
+  }'
+```
+
+```bash place order (guest checkout)
+curl -X POST https://your-store.example.com/store-api/checkout/order \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "guest@example.com",
+    "salutationId": "salutation-uuid",
+    "firstName": "Jane",
+    "lastName": "Doe",
+    "billingAddress": {
+      "street": "123 Main St",
+      "zipcode": "10001",
+      "city": "New York",
+      "countryId": "country-uuid"
+    }
+  }'
+```
+
+```json response
+{
+  "id": "order-uuid",
+  "orderNumber": "10042",
+  "amountTotal": 34.98,
+  "stateMachineState": { "name": "open" },
+  "transactions": [
+    {
+      "id": "transaction-uuid",
+      "paymentMethodId": "payment-method-uuid",
+      "stateMachineState": { "name": "open" }
+    }
+  ]
+}
+```
+
+</CodeGroup>
+
+Save the `order.id` and `transactions[0].id` — you need them to handle payment in the next step.
+
+</Step>
+
+<Step title="Handle payment">
+
+Initiate payment processing for the placed order.
+
+`POST /store-api/handle-payment`
+
+<ParamField body="orderId" type="string" required>
+  The UUID of the order returned in the previous step.
+</ParamField>
+
+<ParamField body="finishUrl" type="string">
+  URL to redirect the customer to after successful payment. Required for redirect-based payment methods.
+</ParamField>
+
+<ParamField body="errorUrl" type="string">
+  URL to redirect the customer to if payment fails.
+</ParamField>
+
+<CodeGroup>
+
+```bash handle payment (synchronous)
+curl -X POST https://your-store.example.com/store-api/handle-payment \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "orderId": "order-uuid"
+  }'
+```
+
+```bash handle payment (redirect-based)
+curl -X POST https://your-store.example.com/store-api/handle-payment \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "orderId": "order-uuid",
+    "finishUrl": "https://your-storefront.example.com/checkout/finish",
+    "errorUrl": "https://your-storefront.example.com/checkout/error"
+  }'
+```
+
+```json response (synchronous)
+{
+  "paid": true
+}
+```
+
+```json response (redirect)
+{
+  "redirectUrl": "https://payment-provider.example.com/pay?token=abc123"
+}
+```
+
+</CodeGroup>
+
+For redirect-based payments, send the customer to `redirectUrl`. The payment provider will redirect back to your `finishUrl` or `errorUrl` when done.
+
+</Step>
+
+</Steps>
+
+---
+
+## Quick reference
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/store-api/account/login` | POST | Authenticate a registered customer |
+| `/store-api/shipping-method` | GET | List available shipping methods |
+| `/store-api/payment-method` | GET | List available payment methods |
+| `/store-api/checkout/order` | POST | Place the order from the active cart |
+| `/store-api/handle-payment` | POST | Initiate payment for a placed order |

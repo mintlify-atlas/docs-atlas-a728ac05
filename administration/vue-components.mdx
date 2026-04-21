@@ -1,0 +1,227 @@
+---
+title: "Extend the Admin UI with Vue components"
+description: "Register new Vue components or override existing ones in the Shopware Admin using the component factory, Twig.js templates, and the Shopware UI library."
+---
+
+The Shopware Admin uses a runtime component factory instead of standard Vue Single File Components (SFCs). Every component is registered by name through `Shopware.Component` and its template is managed by a Twig.js engine. This makes it possible for any plugin to override individual template blocks, extend component logic, or inject entirely new components — all without modifying core files.
+
+## Component registration
+
+Use `Shopware.Component.register()` to add a new component. Components are lazy-loaded by passing an import function so only the code that is actually needed gets bundled.
+
+```javascript
+// my-plugin/src/Resources/app/administration/src/main.js
+
+Shopware.Component.register('my-product-badge', () => import('./component/my-product-badge'));
+```
+
+The component file exports a plain options object (no `<script setup>` or SFC syntax):
+
+```javascript
+// component/my-product-badge/index.js
+
+const { Component } = Shopware;
+
+Component.register('my-product-badge', {
+    template: `
+        <div class="my-product-badge">
+            <sw-label :variant="variant">{{ label }}</sw-label>
+        </div>
+    `,
+
+    props: {
+        label: {
+            type: String,
+            required: true,
+        },
+        variant: {
+            type: String,
+            default: 'info',
+        },
+    },
+});
+```
+
+<Tip>
+Keep the template in a separate `.html.twig` file and import it so it can be overridden by downstream plugins. Use `import template from './my-product-badge.html.twig'` and set `template` in the options object.
+</Tip>
+
+## Overriding an existing component
+
+`Shopware.Component.override()` lets you replace the template or extend the options of any registered component. The override is merged on top of the original at runtime.
+
+```javascript
+Shopware.Component.override('sw-product-list', {
+    methods: {
+        // Add behaviour on top of the original getList
+        async getList() {
+            await this.$super('getList');
+            console.log('Product list refreshed', this.total);
+        },
+    },
+});
+```
+
+Call `this.$super('methodName')` to invoke the original implementation. You can also override just the template by providing a new Twig template string that extends the original block structure.
+
+## Extending a component with `extend`
+
+`Shopware.Component.extend()` creates a new named component that inherits from an existing one — useful for specialised variants of a base component:
+
+```javascript
+Shopware.Component.extend(
+    'my-product-visibility-select',
+    'sw-entity-multi-select',
+    () => import('./component/my-product-visibility-select'),
+);
+```
+
+This is the same pattern used internally — for example, `sw-product-visibility-select` extends `sw-entity-multi-select` in the core product module.
+
+## Using Shopware's UI component library
+
+The `app/component/` directory ships a full set of UI primitives. You can use them directly in your templates:
+
+| Component | Purpose |
+|---|---|
+| `sw-card` | Sectioned content card with header/footer slots |
+| `sw-button` | Primary, secondary, ghost, and danger variants |
+| `sw-data-grid` | Sortable, filterable data table |
+| `sw-entity-listing` | Data grid pre-wired to a DAL repository |
+| `sw-text-field`, `sw-select-field` | Form inputs with validation |
+| `sw-modal` | Accessible dialog overlay |
+| `sw-label` | Inline badge/tag |
+| `sw-icon` | SVG icon by name |
+
+```html
+<sw-card title="My custom section">
+    <sw-text-field
+        v-model="myValue"
+        label="Custom field"
+        :error="fieldErrors.myValue"
+    />
+    <template #footer>
+        <sw-button variant="primary" @click="onSave">Save</sw-button>
+    </template>
+</sw-card>
+```
+
+## TypeScript in admin components
+
+New components should be written in TypeScript. Export a typed options object:
+
+```typescript
+// component/my-stock-indicator/index.ts
+import type { PropType } from 'vue';
+
+const { Component } = Shopware;
+
+Component.register('my-stock-indicator', {
+    template: `
+        <span :class="stockClass">{{ stockLabel }}</span>
+    `,
+
+    props: {
+        stock: {
+            type: Number as PropType<number>,
+            required: true,
+        },
+    },
+
+    computed: {
+        stockClass(): string {
+            return this.stock > 0 ? 'in-stock' : 'out-of-stock';
+        },
+
+        stockLabel(): string {
+            return this.stock > 0 ? `${this.stock} in stock` : 'Out of stock';
+        },
+    },
+});
+```
+
+## Accessing the data store
+
+### Repository (DAL)
+
+Inject `repositoryFactory` to read and write entities through the Data Abstraction Layer:
+
+```typescript
+import { Criteria } from '@shopware-ag/meteor-admin-sdk/es/data/Criteria';
+
+Component.register('my-product-picker', {
+    inject: ['repositoryFactory'],
+
+    data(): { products: unknown[] } {
+        return { products: [] };
+    },
+
+    computed: {
+        productRepository() {
+            return this.repositoryFactory.create('product');
+        },
+    },
+
+    async created() {
+        const criteria = new Criteria(1, 25);
+        criteria.addSorting(Criteria.sort('name', 'ASC'));
+
+        this.products = await this.productRepository.search(
+            criteria,
+            Shopware.Context.api,
+        );
+    },
+});
+```
+
+### Pinia stores
+
+Access global admin state via `Shopware.Store.get()`:
+
+```typescript
+Component.register('my-notification-button', {
+    methods: {
+        showSuccess(): void {
+            Shopware.Store.get('notification').createNotification({
+                variant: 'success',
+                message: this.$tc('my-plugin.notification.saved'),
+            });
+        },
+    },
+});
+```
+
+<Note>
+Always use `Shopware.Store.get()` and `Shopware.Service()` rather than importing factories directly. Direct imports bypass the plugin decoration system and will break override chains.
+</Note>
+
+## Registering components from a plugin entry point
+
+<Steps>
+  <Step title="Create the component directory">
+    ```
+    my-plugin/src/Resources/app/administration/src/
+    └── component/
+        └── my-custom-card/
+            ├── index.ts
+            └── my-custom-card.html.twig
+    ```
+  </Step>
+
+  <Step title="Register in main.js">
+    ```javascript
+    // main.js
+    Shopware.Component.register(
+        'my-custom-card',
+        () => import('./component/my-custom-card'),
+    );
+    ```
+  </Step>
+
+  <Step title="Use in a module route or template">
+    ```html
+    <!-- inside a parent component template -->
+    <my-custom-card :entity="product" />
+    ```
+  </Step>
+</Steps>

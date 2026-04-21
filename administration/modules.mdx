@@ -1,0 +1,293 @@
+---
+title: "Add custom modules to the Shopware Admin"
+description: "Register a full admin module with routes, sidebar navigation, and ACL permissions using Shopware.Module.register and the module factory."
+---
+
+A module in the Shopware Admin is a self-contained unit that owns its routes, components, navigation entry, and ACL privileges. Core modules such as `sw-product`, `sw-order`, and `sw-customer` are each registered this way, and plugin modules follow exactly the same pattern. The module factory validates each registration and mounts routes automatically through Vue Router.
+
+## Module identifier format
+
+Every module identifier must follow the pattern `[namespace]-[name]`, for example `my-plugin-inventory` or `acme-subscriptions`. The identifier becomes the Vue Router route prefix — `my-plugin-inventory` produces route names like `my.plugin.inventory.index`.
+
+<Note>
+Plugin navigation entries are not allowed on the first level of the sidebar. Always set a `parent` property pointing to an existing navigation group (e.g. `sw-catalogue`, `sw-order`, `sw-settings`).
+</Note>
+
+## Minimal module registration
+
+```javascript
+// my-plugin/src/Resources/app/administration/src/module/my-subscriptions/index.js
+
+// 1. Register page components (lazy-loaded)
+Shopware.Component.register(
+    'my-subscriptions-list',
+    () => import('./page/my-subscriptions-list'),
+);
+Shopware.Component.register(
+    'my-subscriptions-detail',
+    () => import('./page/my-subscriptions-detail'),
+);
+
+// 2. Register the module
+Shopware.Module.register('my-subscriptions', {
+    type: 'plugin',
+    name: 'subscriptions',
+    title: 'my-subscriptions.general.mainMenuLabel',
+    description: 'my-subscriptions.general.description',
+    color: '#9AA8B5',
+    icon: 'regular-sync',
+
+    routes: {
+        index: {
+            components: { default: 'my-subscriptions-list' },
+            path: 'index',
+            meta: {
+                privilege: 'my_subscription.viewer',
+            },
+        },
+        detail: {
+            component: 'my-subscriptions-detail',
+            path: 'detail/:id?',
+            props: {
+                default: (route) => ({ subscriptionId: route.params.id }),
+            },
+            meta: {
+                privilege: 'my_subscription.viewer',
+                parentPath: 'my.subscriptions.index',
+            },
+        },
+    },
+
+    navigation: [
+        {
+            id: 'my-subscriptions',
+            label: 'my-subscriptions.general.mainMenuLabel',
+            color: '#9AA8B5',
+            icon: 'regular-sync',
+            path: 'my.subscriptions.index',
+            parent: 'sw-order',
+            privilege: 'my_subscription.viewer',
+            position: 100,
+        },
+    ],
+});
+```
+
+## Module structure
+
+A well-organised module mirrors the layout used by core modules:
+
+```
+my-subscriptions/
+├── index.js                        # Registration (required)
+├── acl/
+│   └── index.js                    # Privilege mappings
+├── page/
+│   ├── my-subscriptions-list/      # List page component
+│   └── my-subscriptions-detail/    # Detail page component
+├── view/                           # Optional detail tab views
+├── component/                      # Module-scoped sub-components
+└── snippet/
+    ├── en-GB.json                  # English translations
+    └── de-DE.json                  # German translations
+```
+
+## Routes in depth
+
+<Tabs>
+  <Tab title="List route">
+    ```javascript
+    routes: {
+        index: {
+            components: { default: 'my-subscriptions-list' },
+            path: 'index',
+            meta: {
+                privilege: 'my_subscription.viewer',
+                appSystem: { view: 'list' },
+            },
+        },
+    }
+    ```
+  </Tab>
+  <Tab title="Detail route with children">
+    ```javascript
+    routes: {
+        detail: {
+            component: 'my-subscriptions-detail',
+            path: 'detail/:id?',
+            redirect: { name: 'my.subscriptions.detail.base' },
+            meta: {
+                privilege: 'my_subscription.viewer',
+                parentPath: 'my.subscriptions.index',
+            },
+            children: {
+                base: {
+                    component: 'my-subscriptions-detail-base',
+                    path: 'base',
+                    meta: {
+                        privilege: 'my_subscription.viewer',
+                        parentPath: 'my.subscriptions.index',
+                    },
+                },
+            },
+        },
+    }
+    ```
+  </Tab>
+  <Tab title="Settings item">
+    ```javascript
+    settingsItem: [
+        {
+            group: 'plugins',
+            to: 'my.subscriptions.settings',
+            icon: 'regular-sync',
+            privilege: 'my_subscription.viewer',
+            id: 'my-subscriptions-settings',
+            label: 'my-subscriptions.settings.title',
+        },
+    ],
+    ```
+  </Tab>
+</Tabs>
+
+## ACL permissions
+
+Define privilege roles in `acl/index.js`. Each role lists the raw API permissions it grants and the roles it depends on:
+
+```javascript
+// acl/index.js
+
+Shopware.Service('privileges').addPrivilegeMappingEntry({
+    category: 'permissions',
+    parent: null,
+    key: 'my_subscription',
+
+    roles: {
+        viewer: {
+            privileges: [
+                'my_subscription:read',
+                'customer:read',
+                'product:read',
+            ],
+            dependencies: [],
+        },
+        editor: {
+            privileges: [
+                'my_subscription:update',
+            ],
+            dependencies: ['my_subscription.viewer'],
+        },
+        creator: {
+            privileges: [
+                'my_subscription:create',
+            ],
+            dependencies: ['my_subscription.viewer', 'my_subscription.editor'],
+        },
+        deleter: {
+            privileges: [
+                'my_subscription:delete',
+            ],
+            dependencies: ['my_subscription.viewer'],
+        },
+    },
+});
+```
+
+Import the ACL file at the top of your module's `index.js` before calling `Shopware.Module.register()`:
+
+```javascript
+import './acl';
+```
+
+Reference privileges in route `meta` and use the injected `acl` service in component logic:
+
+```typescript
+Component.register('my-subscriptions-list', {
+    inject: ['acl'],
+
+    computed: {
+        canCreate(): boolean {
+            return this.acl.can('my_subscription.creator');
+        },
+    },
+});
+```
+
+## Navigation entries
+
+Navigation entries attach your module to the sidebar tree. Plugin entries must specify a `parent` pointing to an existing group:
+
+```javascript
+navigation: [
+    {
+        id: 'my-subscriptions',
+        label: 'my-subscriptions.general.mainMenuLabel',
+        color: '#9AA8B5',
+        icon: 'regular-sync',
+        path: 'my.subscriptions.index',
+
+        // Must be set for plugin modules — top-level entries are not allowed
+        parent: 'sw-order',
+
+        privilege: 'my_subscription.viewer',
+
+        // Position within the parent group; plugin entries are offset by +1000
+        position: 10,
+    },
+],
+```
+
+<Tip>
+Common parent IDs for plugin navigation entries: `sw-catalogue` (products & categories), `sw-order` (orders), `sw-customer` (customers), `sw-content` (CMS/media), `sw-settings` (settings).
+</Tip>
+
+## Snippets (i18n)
+
+Register translation files inside the module `index.js` or via the `snippets` key in the module manifest:
+
+```javascript
+Shopware.Module.register('my-subscriptions', {
+    // ...
+    snippets: {
+        'en-GB': () => import('./snippet/en-GB.json'),
+        'de-DE': () => import('./snippet/de-DE.json'),
+    },
+});
+```
+
+```json
+// snippet/en-GB.json
+{
+    "my-subscriptions": {
+        "general": {
+            "mainMenuLabel": "Subscriptions",
+            "description": "Manage recurring product subscriptions"
+        },
+        "list": {
+            "title": "Subscriptions",
+            "buttonCreate": "New subscription"
+        }
+    }
+}
+```
+
+Use translations in components with `this.$tc()`:
+
+```javascript
+this.$tc('my-subscriptions.list.title')
+```
+
+## Module registry
+
+At runtime you can inspect all registered modules through the factory:
+
+```javascript
+const registry = Shopware.Module.getModuleRegistry();
+// Returns a Map<string, ModuleDefinition>
+
+registry.forEach((module, id) => {
+    console.log(id, module.manifest.name);
+});
+```
+
+This is the same registry Vue Router reads when building the route table during the boot sequence.

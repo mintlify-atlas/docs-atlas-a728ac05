@@ -1,0 +1,258 @@
+---
+title: "Customize Storefront templates with Twig"
+description: "Override Shopware Storefront templates using Twig block inheritance and sw_extends. Inject variables via PageLoadedEvent without duplicating entire template files."
+---
+
+Shopware's Storefront is built entirely on Twig templates. Every HTML element on every page lives inside a named `{% block %}`, which means you can override any part of the UI in a plugin or custom theme without copying the whole file. The key is Shopware's `{% sw_extends %}` tag, which participates in the template resolution chain so that multiple plugins can each override the same template cooperatively.
+
+## Template directory structure
+
+Core Storefront templates live under:
+
+```
+src/Storefront/Resources/views/storefront/
+├── base.html.twig          ← root layout (doctype, <html>, header ESI, footer ESI)
+├── layout/
+│   ├── header.html.twig
+│   ├── footer.html.twig
+│   ├── meta.html.twig
+│   └── navigation/
+├── page/
+│   ├── content/            ← navigation / CMS pages
+│   ├── product-detail/
+│   ├── checkout/
+│   ├── account/
+│   ├── search/
+│   └── error/
+├── component/              ← reusable partials (product cards, alerts, forms …)
+├── element/                ← CMS element templates
+├── block/                  ← CMS block templates
+└── utilities/              ← alert, icon, thumbnail helpers
+```
+
+In your plugin or theme, mirror this structure under `Resources/views/`:
+
+```
+MyPlugin/
+└── src/
+    └── Resources/
+        └── views/
+            └── storefront/
+                └── page/
+                    └── product-detail/
+                        └── index.html.twig   ← your override
+```
+
+## sw_extends and block overriding
+
+Use `{% sw_extends %}` instead of the standard Twig `{% extends %}` when overriding Storefront templates. `sw_extends` goes through Shopware's `TemplateFinder`, which builds a resolution chain that includes all active plugins and the active theme. This means two plugins can each override the same template and both changes apply — the later plugin in the chain calls `{{ parent() }}` to pass through the previous override.
+
+<Tabs>
+  <Tab title="Basic block override">
+    ```twig
+    {# Resources/views/storefront/page/product-detail/index.html.twig #}
+    {% sw_extends '@Storefront/storefront/page/product-detail/index.html.twig' %}
+
+    {% block page_product_detail_content %}
+        <div class="custom-badge">Sale!</div>
+        {{ parent() }}
+    {% endblock %}
+    ```
+  </Tab>
+  <Tab title="Replace a block entirely">
+    ```twig
+    {% sw_extends '@Storefront/storefront/page/product-detail/index.html.twig' %}
+
+    {% block page_product_detail_headline %}
+        <h1 class="my-custom-headline">{{ page.product.translated.name }}</h1>
+    {% endblock %}
+    ```
+    Omitting `{{ parent() }}` replaces the block content completely.
+  </Tab>
+  <Tab title="Prepend and append">
+    ```twig
+    {% sw_extends '@Storefront/storefront/layout/header.html.twig' %}
+
+    {% block layout_header_logo %}
+        <span class="header-promo">Free shipping over $50</span>
+        {{ parent() }}
+    {% endblock %}
+
+    {% block layout_header_actions %}
+        {{ parent() }}
+        <a href="/wishlist" class="header-wishlist-link">Wishlist</a>
+    {% endblock %}
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+Never use `{% extends %}` for Storefront templates. It bypasses `TemplateFinder` and breaks the cooperative override chain — your plugin will conflict with any other plugin that touches the same template.
+</Note>
+
+## Template hierarchy resolution
+
+When `renderStorefront('@Storefront/storefront/page/product-detail/index.html.twig', ...)` is called, `TemplateFinder` resolves the template in this priority order:
+
+1. **Active theme** override (if the theme provides this file)
+2. **Plugin overrides** — ordered by plugin load order; each `sw_extends` becomes one link in a chain
+3. **Core Storefront** template (the original file in `src/Storefront/Resources/views/`)
+
+Because each level uses `sw_extends` pointing at the `@Storefront` namespace, Twig sees a linear inheritance chain and `{{ parent() }}` traverses it correctly.
+
+```
+YourPlugin/index.html.twig  (sw_extends @Storefront/…)
+    └── OtherPlugin/index.html.twig  (sw_extends @Storefront/…)
+        └── Core storefront/page/product-detail/index.html.twig
+```
+
+## Shopware-specific Twig functions and filters
+
+Shopware registers several custom Twig extensions on top of the standard Twig library:
+
+| Function / Filter | Source | Usage |
+|---|---|---|
+| `config(key)` | `ConfigExtension` | Read a `core.*` system configuration value |
+| `theme_config(key)` | `ConfigExtension` | Read a theme configuration variable (e.g. `theme_config('sw-color-brand-primary')`) |
+| `theme_scripts()` | `ConfigExtension` | Returns the list of JS entry points defined in `theme.json` |
+| `sw_sanitize` (filter) | core | Sanitizes HTML to prevent XSS |
+| `sw_icon(name)` | `IconTokenParser` | Renders an SVG icon from the active theme's icon set |
+| `sw_thumbnails(media, sizes)` | `ThumbnailTokenParser` | Generates a `<img srcset>` element for media thumbnails |
+| `url_encode` (filter) | `UrlEncodingTwigFilter` | URL-encodes a string while preserving slashes |
+| `trans` (filter) | Symfony | Translates a snippet key: `'account.loginSubmit'|trans` |
+
+### Examples
+
+```twig
+{# Read a theme color variable #}
+<style>
+    .my-element { color: {{ theme_config('sw-color-brand-primary') }}; }
+</style>
+
+{# Render an SVG icon #}
+{% sw_icon 'heart' style='solid' %}
+
+{# Generate responsive image markup #}
+{% sw_thumbnails page.product.cover.media with {
+    sizes: '(max-width: 768px) 100vw, 50vw'
+} %}
+
+{# Translate a snippet with a parameter #}
+{{ 'product.addedToCartMessage'|trans({'%name%': page.product.translated.name})|sw_sanitize }}
+
+{# Read system config #}
+{% if config('core.listing.showReview') %}
+    {% sw_include '@Storefront/storefront/component/review/review-listing.html.twig' %}
+{% endif %}
+```
+
+## Adding variables to existing pages with PageLoadedEvent
+
+You never need to modify core PHP to add a variable to a page. Subscribe to the page's `PageLoadedEvent` and attach a custom struct as an extension:
+
+<Steps>
+  <Step title="Create a struct to hold your data">
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Storefront\Struct;
+
+    use Shopware\Core\Framework\Struct\Struct;
+
+    class PromoBannerStruct extends Struct
+    {
+        public function __construct(
+            private readonly string $text,
+            private readonly string $targetUrl,
+        ) {}
+
+        public function getText(): string { return $this->text; }
+        public function getTargetUrl(): string { return $this->targetUrl; }
+    }
+    ```
+  </Step>
+
+  <Step title="Subscribe to the PageLoadedEvent">
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Storefront\Subscriber;
+
+    use MyPlugin\Storefront\Struct\PromoBannerStruct;
+    use Shopware\Storefront\Page\Product\ProductPageLoadedEvent;
+    use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+
+    class ProductPageSubscriber implements EventSubscriberInterface
+    {
+        public static function getSubscribedEvents(): array
+        {
+            return [
+                ProductPageLoadedEvent::class => 'onProductPageLoaded',
+            ];
+        }
+
+        public function onProductPageLoaded(ProductPageLoadedEvent $event): void
+        {
+            $event->getPage()->addExtension(
+                'promoBanner',
+                new PromoBannerStruct('Free gift with this product!', '/free-gift')
+            );
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Register the subscriber">
+    ```xml
+    <!-- Resources/config/services.xml -->
+    <service id="MyPlugin\Storefront\Subscriber\ProductPageSubscriber">
+        <tag name="kernel.event_subscriber"/>
+    </service>
+    ```
+  </Step>
+
+  <Step title="Access the extension in your template">
+    ```twig
+    {# Resources/views/storefront/page/product-detail/index.html.twig #}
+    {% sw_extends '@Storefront/storefront/page/product-detail/index.html.twig' %}
+
+    {% block page_product_detail_content %}
+        {% set banner = page.extensions.promoBanner %}
+        {% if banner %}
+            <div class="alert alert-info">
+                <a href="{{ banner.targetUrl }}">{{ banner.text }}</a>
+            </div>
+        {% endif %}
+        {{ parent() }}
+    {% endblock %}
+    ```
+  </Step>
+</Steps>
+
+## Using assets in templates
+
+Reference plugin or theme assets using Symfony's `asset()` function. Assets in `Resources/public/` are copied to the web-accessible public directory at plugin installation.
+
+```twig
+{# Reference a plugin asset #}
+<img src="{{ asset('bundles/myplugin/images/logo.png') }}" alt="Logo">
+
+{# Reference a storefront asset (compiled by Webpack) #}
+<link rel="stylesheet" href="{{ asset('css/all.css', 'storefront') }}">
+```
+
+<Tip>
+For SCSS customization, place your styles in `Resources/app/storefront/src/scss/` and import them from a `base.scss` entry point. Register the entry in your plugin's `theme.json` under the `style` key so Webpack includes them in the theme compilation step.
+</Tip>
+
+## Template naming conventions
+
+Shopware templates use a consistent block-naming pattern based on the file path and purpose. For `storefront/page/product-detail/index.html.twig`, blocks are named:
+
+```
+page_product_detail_*         ← top-level page blocks
+page_product_detail_buy_*     ← buy-box section
+page_product_detail_tabs_*    ← description / review tabs
+```
+
+Look at the core template's block names before overriding — keeping overrides granular minimizes conflicts with other plugins and reduces the chance of breakage during Shopware updates.

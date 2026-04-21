@@ -1,0 +1,127 @@
+---
+title: "Shopware architecture and core concepts"
+description: "A high-level map of Shopware's modules, three HTTP APIs, custom data layer, Symfony bundle system, and the extension patterns for plugins and apps."
+---
+
+Shopware is built as a set of Symfony bundles organized around four main modules: **Core**, **Administration**, **Storefront**, and **Elasticsearch**. Each module has a clear responsibility boundary, and all inter-module communication goes through well-defined APIs and events rather than direct service coupling. This page introduces those modules, explains the three HTTP APIs, and outlines the primary patterns you will use when extending or integrating with Shopware.
+
+## Module structure
+
+```
+src/
+├── Core/           # Business logic, DAL, Framework, System, Checkout, Content
+├── Administration/ # Vue 3 admin panel
+├── Storefront/     # Twig-based storefront (Bootstrap 5, Webpack)
+└── Elasticsearch/  # OpenSearch / Elasticsearch integration
+```
+
+<CardGroup cols={2}>
+  <Card title="Core" icon="server">
+    Contains all business logic split into sub-namespaces: `Framework` (DAL, events, context), `System` (sales channels, currencies, languages), `Checkout` (cart, orders, customers), and `Content` (products, categories, media, CMS).
+  </Card>
+  <Card title="Administration" icon="layout-dashboard">
+    A Vue 3 single-page application served at `/admin`. It communicates exclusively with the Admin API (`/api/`) and is fully replaceable or extendable through JavaScript module overrides.
+  </Card>
+  <Card title="Storefront" icon="globe">
+    A server-side-rendered Twig frontend bundled with Webpack. It calls the Store API internally and supports theme inheritance and Twig block overrides.
+  </Card>
+  <Card title="Elasticsearch" icon="search">
+    An optional bundle that replaces DAL search queries with Elasticsearch/OpenSearch calls for large catalogs. It registers its own entity indexers and search result hydrators.
+  </Card>
+</CardGroup>
+
+## API-first design
+
+Shopware exposes three distinct HTTP APIs. Every operation that can be performed through the Administration or Storefront can also be performed via one of these APIs.
+
+| API | Base path | Audience |
+|-----|-----------|----------|
+| Admin API | `/api/` | Admin users and integrations — full CRUD on all entities |
+| Store API | `/store-api/` | Storefront and headless clients — customer-facing operations |
+| Sync API | `/api/_action/sync` | Bulk upserts and deletes across multiple entity types |
+
+<Note>
+The Store API requires a sales channel access key (`sw-access-key` header). Requests are automatically scoped to the sales channel that owns the key, so prices, languages, and available payment methods all reflect that channel's configuration.
+</Note>
+
+## Custom Data Abstraction Layer
+
+Shopware does **not** use Doctrine ORM. Instead it provides a custom Data Abstraction Layer (DAL) that maps PHP `EntityDefinition` classes to database tables and exposes a fluent `Criteria` API for all reads. The DAL handles:
+
+- Schema introspection and query generation via `EntityDefinition`
+- Fluent search, filter, sort, and aggregation via `Criteria`
+- Read/write operations via `EntityRepository`
+- Automatic translation resolution, inheritance, versioning, and extension fields
+
+See [Data Abstraction Layer](/architecture/data-abstraction-layer) for a full explanation and code examples.
+
+## Symfony bundle system
+
+Every Shopware module registers as a standard Symfony bundle. Plugins follow the same pattern: a plugin class that extends `Plugin` (which itself extends `Bundle`) is enough to register services, routes, migrations, and overrides. The kernel discovers plugins from the `custom/plugins/` directory.
+
+```php
+// A minimal plugin bootstrap
+namespace MyPlugin;
+
+use Shopware\Core\Framework\Plugin;
+
+class MyPlugin extends Plugin {}
+```
+
+Because plugins are Symfony bundles, you can use the full Symfony DI container, event system, compiler passes, and configuration tree builder without any Shopware-specific plumbing.
+
+## Extension patterns
+
+Shopware supports three extension approaches, each aimed at a different deployment model.
+
+<Tabs>
+  <Tab title="Plugins">
+    PHP bundles deployed directly on the server. Plugins can use any of the extension patterns described below and have unrestricted access to the DI container. Best for complex, server-side extensions.
+  </Tab>
+  <Tab title="Apps">
+    Webhook-based integrations that run on an external server. Apps communicate with Shopware through signed HTTP requests and can use App Scripts (server-side Twig executed inside Shopware) for lightweight logic that must run synchronously inside a request.
+  </Tab>
+  <Tab title="Themes">
+    Storefront-only extensions that override Twig blocks and SCSS variables. Themes inherit from parent themes and are managed through the theme compiler.
+  </Tab>
+</Tabs>
+
+### Design patterns
+
+| Pattern | When to use |
+|---------|-------------|
+| **Events** (Mediator) | React to actions without modifying core code. Preferred for most use cases. |
+| **Decoration** | Wrap and replace a service entirely — used for Store API routes via `AbstractXxxRoute`. |
+| **Factory / Registry** | Add new types to an open-ended set, such as custom line item handlers. |
+| **Visitor** | Process collections of objects in sequence, such as cart processors. |
+
+<Tip>
+Prefer events over decoration wherever possible. Events keep extensions independent of each other and allow multiple extensions to react to the same action without conflicts.
+</Tip>
+
+## The Context object
+
+Every DAL operation and most service calls receive a `Context` object (`Shopware\Core\Framework\Context`). It carries:
+
+- **Language chain** — ordered list of language IDs for fallback translation resolution
+- **Currency ID and factor** — for price conversion
+- **Version ID** — for draft/versioning support
+- **Rule IDs** — active pricing and shipping rules for the current request
+- **Source** — `SystemSource`, `AdminApiSource`, or a sales-channel-specific source
+- **Scope** — `system`, `user`, or `crud`, controlling which write operations are permitted
+
+For storefront and Store API requests, `Context` is wrapped inside a `SalesChannelContext` that additionally carries the customer, payment method, shipping method, and the full `SalesChannelEntity`. See [Sales Channels](/architecture/sales-channels) for details.
+
+## Learn more
+
+<CardGroup cols={2}>
+  <Card title="Data Abstraction Layer" icon="database" href="/architecture/data-abstraction-layer">
+    EntityDefinition, EntityRepository, Criteria API, and how to define custom entities.
+  </Card>
+  <Card title="Event system" icon="zap" href="/architecture/event-system">
+    EventSubscriberInterface, business events, App Script hooks, and best practices.
+  </Card>
+  <Card title="Sales Channels" icon="store" href="/architecture/sales-channels">
+    Multi-storefront management, SalesChannelContext, access keys, and per-channel configuration.
+  </Card>
+</CardGroup>

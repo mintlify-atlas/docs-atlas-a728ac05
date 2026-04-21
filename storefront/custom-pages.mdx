@@ -1,0 +1,380 @@
+---
+title: "Add custom pages to the Shopware Storefront"
+description: "Add a new page to the Shopware Storefront by building a StorefrontController, a typed Page struct, a PageLoader, and a Twig template wired via route XML."
+---
+
+Adding a completely new page to the Shopware Storefront means following the same Controller → PageLoader → Template pattern that all built-in pages use. The pattern keeps concerns cleanly separated: the controller handles HTTP, the page loader assembles data from Store API routes, and the Twig template handles rendering. This page walks through every step from creating the PHP classes to rendering the final HTML.
+
+## Overview of what you'll build
+
+<CardGroup cols={2}>
+  <Card title="StorefrontController" icon="code">
+    Handles the HTTP route, delegates to the PageLoader, fires the `PageLoadedHook`, and calls `renderStorefront()`.
+  </Card>
+  <Card title="Page + PageLoader" icon="layers">
+    A typed `Page` struct carries all template data. The `PageLoader` populates it from Store API routes and dispatches a `PageLoadedEvent`.
+  </Card>
+  <Card title="Route registration" icon="route">
+    Routes are declared via PHP attributes directly on controller methods with `#[Route]` and scoped to `StorefrontRouteScope`.
+  </Card>
+  <Card title="Twig template" icon="file-code">
+    Extends `base.html.twig` using `sw_extends` and places content inside the standard layout blocks.
+  </Card>
+</CardGroup>
+
+## Step-by-step implementation
+
+<Steps>
+  <Step title="Create the Page struct">
+    The `Page` base class provides `MetaInformation` support (title, description, canonical URL). Add custom properties for whatever data your page needs.
+
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Storefront\Page\CustomLanding;
+
+    use Shopware\Core\Content\Product\SalesChannel\ProductListResponse;
+    use Shopware\Core\Framework\Log\Package;
+    use Shopware\Storefront\Page\Page;
+
+    #[Package('storefront')]
+    class CustomLandingPage extends Page
+    {
+        private ?ProductListResponse $featuredProducts = null;
+        private string $headline = '';
+
+        public function getFeaturedProducts(): ?ProductListResponse
+        {
+            return $this->featuredProducts;
+        }
+
+        public function setFeaturedProducts(ProductListResponse $products): void
+        {
+            $this->featuredProducts = $products;
+        }
+
+        public function getHeadline(): string
+        {
+            return $this->headline;
+        }
+
+        public function setHeadline(string $headline): void
+        {
+            $this->headline = $headline;
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Create the PageLoadedEvent">
+    The event allows subscribers to inject additional data into the page before it is rendered.
+
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Storefront\Page\CustomLanding;
+
+    use Shopware\Core\Framework\Log\Package;
+    use Shopware\Storefront\Page\PageLoadedEvent;
+
+    #[Package('storefront')]
+    class CustomLandingPageLoadedEvent extends PageLoadedEvent
+    {
+        public function __construct(
+            private readonly CustomLandingPage $page,
+            \Shopware\Core\System\SalesChannel\SalesChannelContext $salesChannelContext,
+            \Symfony\Component\HttpFoundation\Request $request
+        ) {
+            parent::__construct($salesChannelContext, $request);
+        }
+
+        public function getPage(): CustomLandingPage
+        {
+            return $this->page;
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Create the PageLoader">
+    The loader must use Store API routes to fetch data — never call DAL repositories directly inside a PageLoader or Controller. The `GenericPageLoader` handles the common page header/footer/meta setup.
+
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Storefront\Page\CustomLanding;
+
+    use Shopware\Core\Framework\Log\Package;
+    use Shopware\Core\System\SalesChannel\SalesChannelContext;
+    use Shopware\Storefront\Page\GenericPageLoaderInterface;
+    use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+    use Symfony\Component\HttpFoundation\Request;
+
+    #[Package('storefront')]
+    class CustomLandingPageLoader
+    {
+        /**
+         * @internal
+         */
+        public function __construct(
+            private readonly GenericPageLoaderInterface $genericLoader,
+            private readonly EventDispatcherInterface $eventDispatcher,
+        ) {}
+
+        public function load(Request $request, SalesChannelContext $context): CustomLandingPage
+        {
+            // GenericPageLoader populates header, footer, and MetaInformation
+            $page = $this->genericLoader->load($request, $context);
+            $page = CustomLandingPage::createFrom($page);
+
+            $page->setHeadline('Welcome to our custom landing page');
+
+            // Set meta information
+            $page->getMetaInformation()?->setMetaTitle('Custom Landing | My Shop');
+            $page->getMetaInformation()?->setMetaDescription(
+                'Discover our hand-picked selection of featured products.'
+            );
+
+            // Dispatch the event so subscribers can enrich the page
+            $this->eventDispatcher->dispatch(
+                new CustomLandingPageLoadedEvent($page, $context, $request)
+            );
+
+            return $page;
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Create the PageLoadedHook for App Scripts">
+    App Scripts run in a sandboxed environment and need a dedicated hook class to access the page.
+
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Storefront\Page\CustomLanding;
+
+    use Shopware\Core\Framework\Script\Execution\Awareness\SalesChannelContextAwareTrait;
+    use Shopware\Core\System\SalesChannel\SalesChannelContext;
+    use Shopware\Storefront\Page\PageLoadedHook;
+
+    /**
+     * Triggered when the CustomLandingPage is loaded.
+     *
+     * @hook-use-case data_loading
+     */
+    class CustomLandingPageLoadedHook extends PageLoadedHook
+    {
+        use SalesChannelContextAwareTrait;
+
+        final public const HOOK_NAME = 'custom-landing-page-loaded';
+
+        public function __construct(
+            private readonly CustomLandingPage $page,
+            SalesChannelContext $context
+        ) {
+            parent::__construct($context->getContext());
+            $this->salesChannelContext = $context;
+        }
+
+        public function getName(): string
+        {
+            return self::HOOK_NAME;
+        }
+
+        public function getPage(): CustomLandingPage
+        {
+            return $this->page;
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Create the StorefrontController">
+    Extend `StorefrontController` (not Symfony's `AbstractController` directly). Use the `#[Route]` attribute with `StorefrontRouteScope` in the defaults. Call `$this->hook()` to execute any registered App Scripts, then call `$this->renderStorefront()` to render the template.
+
+    ```php
+    <?php declare(strict_types=1);
+
+    namespace MyPlugin\Storefront\Controller;
+
+    use MyPlugin\Storefront\Page\CustomLanding\CustomLandingPageLoadedHook;
+    use MyPlugin\Storefront\Page\CustomLanding\CustomLandingPageLoader;
+    use Shopware\Core\Framework\Log\Package;
+    use Shopware\Core\PlatformRequest;
+    use Shopware\Core\System\SalesChannel\SalesChannelContext;
+    use Shopware\Storefront\Controller\StorefrontController;
+    use Shopware\Storefront\Framework\Routing\StorefrontRouteScope;
+    use Symfony\Component\HttpFoundation\Request;
+    use Symfony\Component\HttpFoundation\Response;
+    use Symfony\Component\Routing\Attribute\Route;
+
+    /**
+     * @internal
+     * Do not use direct or indirect repository calls in a controller.
+     * Always use a Store API route to get or put data.
+     */
+    #[Route(defaults: [PlatformRequest::ATTRIBUTE_ROUTE_SCOPE => [StorefrontRouteScope::ID]])]
+    #[Package('storefront')]
+    class CustomLandingController extends StorefrontController
+    {
+        /**
+         * @internal
+         */
+        public function __construct(
+            private readonly CustomLandingPageLoader $pageLoader
+        ) {}
+
+        #[Route(
+            path: '/custom-landing',
+            name: 'frontend.custom.landing.page',
+            options: ['seo' => false],
+            defaults: [PlatformRequest::ATTRIBUTE_HTTP_CACHE => true],
+            methods: [Request::METHOD_GET],
+        )]
+        public function index(Request $request, SalesChannelContext $context): Response
+        {
+            $page = $this->pageLoader->load($request, $context);
+
+            $this->hook(new CustomLandingPageLoadedHook($page, $context));
+
+            return $this->renderStorefront(
+                '@MyPlugin/storefront/page/custom-landing/index.html.twig',
+                ['page' => $page]
+            );
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Register services">
+    ```xml
+    <!-- src/Resources/config/services.xml -->
+    <?xml version="1.0" ?>
+    <container xmlns="http://symfony.com/schema/dic/services"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://symfony.com/schema/dic/services
+                   https://symfony.com/schema/dic/services/services-1.0.xsd">
+
+        <services>
+            <service id="MyPlugin\Storefront\Page\CustomLanding\CustomLandingPageLoader">
+                <argument type="service" id="Shopware\Storefront\Page\GenericPageLoader"/>
+                <argument type="service" id="event_dispatcher"/>
+            </service>
+
+            <service id="MyPlugin\Storefront\Controller\CustomLandingController"
+                     public="true">
+                <argument type="service"
+                          id="MyPlugin\Storefront\Page\CustomLanding\CustomLandingPageLoader"/>
+                <call method="setContainer">
+                    <argument type="service" id="service_container"/>
+                </call>
+            </service>
+        </services>
+    </container>
+    ```
+
+    <Note>
+    Storefront controllers must be tagged `public="true"` and must have `setContainer` called so that `StorefrontController::getSubscribedServices()` can lazily resolve the services it needs (Twig, event dispatcher, `TemplateFinder`, etc.).
+    </Note>
+  </Step>
+
+  <Step title="Create the Twig template">
+    Place the template under `src/Resources/views/storefront/` in a directory matching the `@MyPlugin` namespace. Extend `base.html.twig` with `sw_extends` to inherit the full page layout (header, footer, flash messages).
+
+    ```twig
+    {# src/Resources/views/storefront/page/custom-landing/index.html.twig #}
+    {% sw_extends '@Storefront/storefront/base.html.twig' %}
+
+    {% block base_main_inner %}
+        <div class="container custom-landing">
+
+            {% block custom_landing_headline %}
+                <h1 class="custom-landing__headline mt-4 mb-3">
+                    {{ page.headline }}
+                </h1>
+            {% endblock %}
+
+            {% block custom_landing_content %}
+                <div class="row">
+                    {% block custom_landing_intro %}
+                        <div class="col-12 mb-4">
+                            <p class="lead">
+                                {{ 'myPlugin.customLanding.intro'|trans|sw_sanitize }}
+                            </p>
+                        </div>
+                    {% endblock %}
+                </div>
+            {% endblock %}
+
+        </div>
+    {% endblock %}
+    ```
+  </Step>
+</Steps>
+
+## Using PageLoadedHook in App Scripts
+
+Once you have a `PageLoadedHook` registered, App Scripts can load additional data at hook time using the `custom-landing-page-loaded` hook name. Place a script in `Resources/scripts/custom-landing-page-loaded/`:
+
+```javascript
+// Resources/scripts/custom-landing-page-loaded/add-data.twig
+const page = hook.page;
+
+// Read a system config value
+const showBanner = config('myPlugin.config.showBanner');
+if (showBanner) {
+    page.addArrayExtension('bannerText', [
+        { text: 'Special offer today only!' }
+    ]);
+}
+```
+
+Access the extension in the Twig template:
+
+```twig
+{% set banners = page.extensions.bannerText %}
+{% if banners %}
+    {% for banner in banners %}
+        <div class="alert alert-warning">{{ banner.text }}</div>
+    {% endfor %}
+{% endif %}
+```
+
+## Adding the page to navigation
+
+To link your custom page in the shop navigation, add a category of type **Link** in the admin under *Catalogues → Categories* and set the external URL to `/custom-landing`. Alternatively, add a direct link in your own header template override:
+
+```twig
+{# Resources/views/storefront/layout/header.html.twig #}
+{% sw_extends '@Storefront/storefront/layout/header.html.twig' %}
+
+{% block layout_header_actions %}
+    {{ parent() }}
+    <a href="{{ path('frontend.custom.landing.page') }}"
+       class="btn btn-sm btn-outline-secondary ms-2">
+        {{ 'myPlugin.nav.customLanding'|trans }}
+    </a>
+{% endblock %}
+```
+
+<Tip>
+Use `path('frontend.custom.landing.page')` (the Symfony `path()` Twig function) rather than hardcoding the URL `/custom-landing`. This keeps links correct when the Storefront is served from a sub-directory or behind a domain-based sales channel.
+</Tip>
+
+## Flash messages and redirects
+
+`StorefrontController` inherits Symfony's flash bag and redirect helpers, plus Shopware-specific wrappers:
+
+```php
+// Add a flash message (type: success | danger | info | warning)
+$this->addFlash(self::SUCCESS, $this->trans('myPlugin.savedSuccessfully'));
+
+// Redirect and dispatch StorefrontRedirectEvent (can be intercepted by subscribers)
+return $this->redirectToRoute('frontend.custom.landing.page');
+
+// Forward to another controller action internally
+return $this->forwardToRoute('frontend.home.page');
+```
+
+Flash messages are automatically rendered by the `base_flashbags` block in `base.html.twig` on the next request.

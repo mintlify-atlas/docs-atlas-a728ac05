@@ -1,0 +1,98 @@
+---
+title: "Shopware Admin: Vue 3 administration panel"
+description: "The Shopware Admin is a Vue 3 single-page application that communicates with the Admin API. Learn how it's structured and how plugins extend it."
+---
+
+The Shopware administration panel is a Vue 3 single-page application (SPA) bundled with Vite and written in TypeScript. It communicates exclusively with the [Admin API](/api/overview) to manage every aspect of your shop — products, orders, customers, settings, and more. Because the admin is built around a module and component factory system, plugins and apps can add new pages, override existing components, and inject navigation entries without forking the core codebase.
+
+## Technology stack
+
+| Layer | Technology |
+|---|---|
+| UI framework | Vue 3 (compiled at runtime via Twig.js templates) |
+| State management | Pinia (primary) + Vuex-compatible legacy stores |
+| Routing | Vue Router |
+| Build tool | Vite |
+| Language | TypeScript (new code), JavaScript (legacy) |
+| HTTP client | Axios |
+| Testing | Jest, Playwright |
+
+## Source layout
+
+The administration source lives in `src/Administration/Resources/app/administration/src/` and is divided into three layers:
+
+```
+src/
+├── core/          # Framework-agnostic code: factories, services, repositories
+│   ├── factory/   # Component, module, service, state, route factories
+│   ├── data/      # Repository system, Criteria API, entity change tracking
+│   └── service/   # Auth, validation, API base classes
+├── app/           # Vue-specific code: global components, stores, composables
+│   ├── component/ # Shared UI components (sw-button, sw-card, sw-data-grid, …)
+│   ├── store/     # Pinia stores (settings items, extension routes, …)
+│   └── init/      # Boot sequence steps
+└── module/        # Business modules (sw-product, sw-order, sw-customer, …)
+    └── sw-product/
+        ├── index.js        # Component + module registration
+        ├── acl/            # Privilege mappings
+        ├── page/           # Full-page list/detail components
+        ├── view/           # Detail tab views
+        ├── component/      # Module-scoped components
+        └── snippet/        # i18n strings
+```
+
+<Note>
+The admin does **not** use Vue Single File Components (SFCs). Templates are managed by a Twig.js-based template factory so that plugins can override individual template blocks at runtime without replacing entire component files.
+</Note>
+
+## How extensions plug in
+
+Plugins interact with the admin through the global `Shopware` object which is available on `window.Shopware` after the boot sequence completes. The three main extension points are:
+
+- **`Shopware.Component.register()`** — register a brand-new Vue component
+- **`Shopware.Component.override()`** — replace the template or logic of an existing component
+- **`Shopware.Module.register()`** — add a routed module with its own navigation entry
+- **`Shopware.Service('privileges').addPrivilegeMappingEntry()`** — define ACL roles for a module
+
+All of these calls must happen before the Vue application mounts. The recommended place is your plugin's `main.js` entry file, which Shopware loads automatically during the admin boot sequence.
+
+## Building the administration
+
+<Steps>
+  <Step title="Install dependencies">
+    Run the following from the repository root:
+
+    ```bash
+    composer build:js:admin
+    ```
+
+    This wraps the Vite build and outputs compiled assets to `src/Administration/Resources/public/`.
+  </Step>
+
+  <Step title="Run linting">
+    ```bash
+    composer eslint:admin         # check
+    composer eslint:admin:fix     # auto-fix
+    composer format:admin:fix     # Prettier
+    ```
+  </Step>
+
+  <Step title="Run unit tests">
+    Execute Jest tests from the administration package directory:
+
+    ```bash
+    npx jest --collectCoverage=false
+    ```
+  </Step>
+</Steps>
+
+## Explore further
+
+<CardGroup cols={2}>
+  <Card title="Vue components" icon="puzzle-piece" href="/administration/vue-components">
+    Register new components, override existing ones, and access Shopware's UI library and data stores.
+  </Card>
+  <Card title="Custom modules" icon="layout-grid" href="/administration/modules">
+    Add full admin modules with routes, navigation entries, and ACL permission definitions.
+  </Card>
+</CardGroup>

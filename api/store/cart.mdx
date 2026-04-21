@@ -1,0 +1,224 @@
+---
+title: "Store API: shopping cart management"
+description: "Create and manage shopping carts, add or remove line items, and update quantities using the Shopware Store API context token flow."
+---
+
+The Store API uses a stateless context token to associate a cart with a session. On your first request the server returns a `sw-context-token` header; include it on all subsequent requests to maintain cart state. No user account is required — guest carts are fully supported.
+
+<Info>
+  Store the `sw-context-token` returned on the first cart request. Include it as a header (`sw-context-token: <token>`) on every subsequent request to keep the cart in the same session.
+</Info>
+
+---
+
+## Get or create a cart
+
+`GET /store-api/checkout/cart`
+
+Retrieves the current cart for the given context token. If no token is provided, a new cart (and token) is created automatically.
+
+<CodeGroup>
+
+```bash create cart (no token)
+curl https://your-store.example.com/store-api/checkout/cart \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX"
+```
+
+```bash get existing cart
+curl https://your-store.example.com/store-api/checkout/cart \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here"
+```
+
+```json response
+{
+  "token": "A1B2C3D4E5F6...",
+  "lineItems": [],
+  "price": {
+    "totalPrice": 0,
+    "netPrice": 0,
+    "taxStatus": "gross"
+  },
+  "errors": []
+}
+```
+
+</CodeGroup>
+
+<Warning>
+  The `sw-context-token` value in the response header is your session identifier. If you omit it on follow-up requests, a new empty cart is created.
+</Warning>
+
+---
+
+## Add a line item
+
+`POST /store-api/checkout/cart/line-item`
+
+Adds one or more items to the cart. Each item requires at least `id`, `type`, and `referencedId`.
+
+<ParamField body="items" type="array" required>
+  Array of line item objects to add.
+</ParamField>
+
+<ParamField body="items[].id" type="string" required>
+  A unique identifier for this line item within the cart (can be any UUID).
+</ParamField>
+
+<ParamField body="items[].type" type="string" required>
+  Item type: `product`, `promotion`, or `custom`.
+</ParamField>
+
+<ParamField body="items[].referencedId" type="string" required>
+  The product UUID (for `type: product`) or promotion code (for `type: promotion`).
+</ParamField>
+
+<ParamField body="items[].quantity" type="integer">
+  Quantity to add. Defaults to `1`.
+</ParamField>
+
+<CodeGroup>
+
+```bash add product
+curl -X POST https://your-store.example.com/store-api/checkout/cart/line-item \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      {
+        "id": "line-item-uuid-here",
+        "type": "product",
+        "referencedId": "01930b2a3c4d5e6f7a8b9c0d1e2f3a4b",
+        "quantity": 2
+      }
+    ]
+  }'
+```
+
+```bash add promotion code
+curl -X POST https://your-store.example.com/store-api/checkout/cart/line-item \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      {
+        "id": "promo-line-item-uuid",
+        "type": "promotion",
+        "referencedId": "SUMMER20"
+      }
+    ]
+  }'
+```
+
+```json response
+{
+  "token": "A1B2C3D4E5F6...",
+  "lineItems": [
+    {
+      "id": "line-item-uuid-here",
+      "type": "product",
+      "label": "Example T-Shirt",
+      "quantity": 2,
+      "price": { "totalPrice": 59.98, "unitPrice": 29.99 }
+    }
+  ],
+  "price": { "totalPrice": 59.98 }
+}
+```
+
+</CodeGroup>
+
+---
+
+## Update line item quantity
+
+`PATCH /store-api/checkout/cart/line-item`
+
+Updates the quantity (or other mutable properties) of existing line items.
+
+<ParamField body="items" type="array" required>
+  Array of line item objects. Each must include `id` and the fields to update.
+</ParamField>
+
+<ParamField body="items[].id" type="string" required>
+  The line item `id` as stored in the cart.
+</ParamField>
+
+<ParamField body="items[].quantity" type="integer">
+  New quantity for the item.
+</ParamField>
+
+<CodeGroup>
+
+```bash update quantity
+curl -X PATCH https://your-store.example.com/store-api/checkout/cart/line-item \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      {
+        "id": "line-item-uuid-here",
+        "quantity": 5
+      }
+    ]
+  }'
+```
+
+```json response
+{
+  "token": "A1B2C3D4E5F6...",
+  "lineItems": [
+    {
+      "id": "line-item-uuid-here",
+      "quantity": 5,
+      "price": { "totalPrice": 149.95, "unitPrice": 29.99 }
+    }
+  ]
+}
+```
+
+</CodeGroup>
+
+---
+
+## Remove a line item
+
+`DELETE /store-api/checkout/cart/line-item`
+
+Removes one or more line items from the cart by their IDs.
+
+<ParamField query="ids" type="array" required>
+  Comma-separated list of line item IDs to remove, passed as repeated query parameters.
+</ParamField>
+
+<CodeGroup>
+
+```bash remove line item
+curl -X DELETE "https://your-store.example.com/store-api/checkout/cart/line-item?ids[]=line-item-uuid-here" \
+  -H "sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX" \
+  -H "sw-context-token: your-context-token-here"
+```
+
+```json response
+{
+  "token": "A1B2C3D4E5F6...",
+  "lineItems": [],
+  "price": { "totalPrice": 0 }
+}
+```
+
+</CodeGroup>
+
+---
+
+## Context token flow summary
+
+| Step | What to do |
+|------|-----------|
+| First request | Call `GET /store-api/checkout/cart` without a token. Read `sw-context-token` from the response header. |
+| Subsequent requests | Pass `sw-context-token: <value>` on every cart and checkout request. |
+| Customer login | After `POST /store-api/account/login`, use the new token returned — the guest cart is merged automatically. |
+| Session end | Tokens expire after the configured session lifetime or when the order is placed. |

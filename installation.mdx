@@ -1,0 +1,342 @@
+---
+title: "Install Shopware for local development"
+description: "Install Shopware locally using Docker Compose or the Symfony Flex template. Covers system requirements, environment setup, migrations, and console commands."
+---
+
+Shopware supports two local installation methods. The **Docker** method uses the official development image and requires no local PHP installation — it is the fastest way to get started and the recommended approach for contributing to Shopware core. The **Symfony Flex template** method installs Shopware as a Composer dependency in a Flex project and gives you full control over the project structure, making it the recommended approach for building production shops and extensions.
+
+## System requirements
+
+<Tabs>
+
+<Tab title="Docker">
+
+You need the following tools installed on your machine:
+
+- [Docker](https://docs.docker.com/get-docker/) 24 or later
+- [Docker Compose](https://docs.docker.com/compose/install/) v2 (included in Docker Desktop)
+
+No local PHP, Node.js, or database installation is required. All runtime dependencies are provided by the official development image `ghcr.io/shopware/docker-dev:php8.4-node24-caddy`.
+
+</Tab>
+
+<Tab title="Symfony Flex template">
+
+The following must be installed on your host machine:
+
+| Requirement | Minimum version | Notes |
+|-------------|----------------|-------|
+| PHP | 8.2 | Supports 8.2, 8.3, 8.4, and 8.5 |
+| PHP extensions | — | `curl`, `dom`, `fileinfo`, `gd`, `intl`, `json`, `mbstring`, `openssl`, `pdo`, `pdo_mysql`, `session`, `simplexml`, `sodium`, `xml`, `zip`, `zlib` |
+| Composer | 2.1+ | Required for `composer-runtime-api ^2.1` |
+| Node.js | 22+ | Required for admin and storefront asset compilation |
+| MySQL | 8.0+ | Or MariaDB 10.11+ |
+| (Optional) OpenSearch | 2.x | Or Elasticsearch 8.x, for full-text search |
+
+</Tab>
+
+</Tabs>
+
+## Installation
+
+<Tabs>
+
+<Tab title="Docker">
+
+<Steps>
+
+<Step title="Clone the repository">
+
+```bash
+git clone https://github.com/shopware/shopware.git
+cd shopware
+```
+
+</Step>
+
+<Step title="Review the Compose configuration">
+
+The `compose.yaml` at the repository root defines all services:
+
+```yaml
+services:
+    web:
+        image: ghcr.io/shopware/docker-dev:php8.4-node24-caddy
+        ports:
+            - 8000:8000
+            - 5173:5173
+            - 9998:9998
+            - 9999:9999
+        environment:
+            APP_ENV: ${APP_ENV-dev}
+            APP_URL: http://localhost:8000
+            DATABASE_URL: mysql://root:root@database/shopware
+            MAILER_DSN: smtp://mailer:1025
+            OPENSEARCH_URL: http://opensearch:9200
+        volumes:
+            - .:/var/www/html
+        depends_on:
+            database:
+                condition: service_healthy
+
+    database:
+        image: mariadb:latest
+        ports:
+            - 3306:3306
+        environment:
+            MARIADB_ROOT_PASSWORD: root
+            MARIADB_DATABASE: shopware
+```
+
+The `web` service mounts the repository root at `/var/www/html`, so file changes on your host are reflected in the container immediately.
+
+</Step>
+
+<Step title="Override environment variables (optional)">
+
+Create a `.env` file in the project root to override any environment variable without restarting containers:
+
+```bash
+# .env
+APP_ENV=dev
+APP_URL=http://localhost:8000
+```
+
+<Note>
+The `APP_ENV` variable is the only exception — changing it requires restarting the containers with `docker compose up -d`.
+</Note>
+
+</Step>
+
+<Step title="Start the containers">
+
+```bash
+docker compose up -d
+```
+
+Docker starts the `web`, `database`, `adminer`, `valkey`, `mailer`, and `opensearch` services. The `web` container waits for `database` to pass its health check before starting.
+
+</Step>
+
+<Step title="Run setup">
+
+Install Composer and npm dependencies, create the database schema, and build the frontend assets:
+
+```bash
+docker compose exec web composer setup
+```
+
+This runs the full setup sequence:
+
+1. `composer install -o`
+2. `bin/console system:install --drop-database --basic-setup --force --no-assign-theme`
+3. JavaScript dependency installation and asset build for Admin and Storefront
+4. `bin/console theme:change --sync --all Storefront`
+5. `bin/console assets:install`
+
+<Warning>
+The `setup` command drops and recreates the database. Do not use it on an existing installation with data you need to keep. To reset without reinstalling dependencies, run `docker compose exec web composer reset` instead.
+</Warning>
+
+</Step>
+
+<Step title="Verify the installation">
+
+Open the following URLs:
+
+| URL | Description |
+|-----|-------------|
+| [http://localhost:8000](http://localhost:8000) | Storefront |
+| [http://localhost:8000/admin](http://localhost:8000/admin) | Admin panel (username: `admin`, password: `shopware`) |
+| [http://localhost:9080](http://localhost:9080) | Adminer — database UI (server: `database`, username: `root`, password: `root`) |
+| [http://localhost:8025](http://localhost:8025) | Mailpit — catches outgoing emails in development |
+
+</Step>
+
+</Steps>
+
+</Tab>
+
+<Tab title="Symfony Flex template">
+
+<Steps>
+
+<Step title="Create a new Flex project">
+
+Use the Shopware production template to scaffold a new project. The template is the recommended way to run Shopware for shop and extension development:
+
+```bash
+composer create-project shopware/production my-shop
+cd my-shop
+```
+
+<Note>
+The `shopware/production` template adds `shopware/platform` as a dependency and pre-configures the Symfony Flex recipes needed for Shopware.
+</Note>
+
+</Step>
+
+<Step title="Configure the environment">
+
+Copy the example environment file and configure your database connection:
+
+```bash
+cp .env.dist .env
+```
+
+Edit `.env` and set at least these variables:
+
+```bash
+APP_ENV=dev
+APP_SECRET=your-32-character-secret-here
+APP_URL=http://localhost:8000
+DATABASE_URL=mysql://root:root@127.0.0.1:3306/shopware
+```
+
+| Variable | Description |
+|----------|-------------|
+| `APP_ENV` | `dev` for local development, `prod` for production |
+| `APP_SECRET` | A random string used for cryptographic signing |
+| `APP_URL` | The base URL Shopware uses for generating links |
+| `DATABASE_URL` | Full DSN for the MySQL or MariaDB database |
+
+</Step>
+
+<Step title="Create the database">
+
+Ensure your MySQL or MariaDB server is running and accessible with the credentials in `DATABASE_URL`. Then install the Shopware schema:
+
+```bash
+php bin/console system:install --basic-setup
+```
+
+The `--basic-setup` flag seeds the database with a default Sales Channel, currency, language, and admin user (username: `admin`, password: `shopware`).
+
+</Step>
+
+<Step title="Install JavaScript dependencies and build assets">
+
+```bash
+npm --prefix vendor/shopware/administration/Resources/app/administration clean-install --no-audit
+npm --prefix vendor/shopware/storefront/Resources/app/storefront clean-install --no-audit
+php bin/console bundle:dump
+php bin/console feature:dump
+php bin/console theme:dump
+```
+
+Then build the Administration and Storefront assets:
+
+```bash
+php bin/console assets:install
+```
+
+For a full build including theme compilation:
+
+```bash
+php bin/console theme:change --sync --all Storefront
+```
+
+</Step>
+
+<Step title="Start the development server">
+
+Shopware works with any web server that supports PHP-FPM (Nginx, Apache, Caddy). For quick local testing, use the Symfony CLI:
+
+```bash
+symfony server:start --port=8000
+```
+
+Or use PHP's built-in server (not recommended for anything beyond basic testing):
+
+```bash
+php -S localhost:8000 -t public/
+```
+
+Open [http://localhost:8000](http://localhost:8000) for the storefront and [http://localhost:8000/admin](http://localhost:8000/admin) for the admin panel.
+
+</Step>
+
+<Step title="Run database migrations">
+
+When updating Shopware or installing plugins, run pending migrations to keep the database schema in sync:
+
+```bash
+php bin/console database:migrate --all
+```
+
+To see which migrations are pending:
+
+```bash
+php bin/console database:migrate-status
+```
+
+</Step>
+
+</Steps>
+
+</Tab>
+
+</Tabs>
+
+## Common console commands
+
+The Shopware CLI is available at `bin/console` (or `php bin/console` outside Docker). Inside Docker, prefix all commands with `docker compose exec web`:
+
+```bash
+# Inside Docker
+docker compose exec web php bin/console <command>
+
+# Outside Docker (Flex template)
+php bin/console <command>
+```
+
+| Command | Description |
+|---------|-------------|
+| `system:install` | Installs or reinstalls the database schema |
+| `database:migrate --all` | Runs all pending database migrations |
+| `plugin:refresh` | Scans `custom/plugins/` and updates the plugin registry |
+| `plugin:install --activate <Name>` | Installs and activates a plugin |
+| `plugin:list` | Lists all registered plugins and their status |
+| `cache:clear` | Clears the Symfony application cache |
+| `theme:change --all Storefront` | Assigns the default Storefront theme to all Sales Channels |
+| `assets:install` | Publishes bundle public assets to `public/bundles/` |
+| `bundle:dump` | Dumps bundle configuration used by the admin build |
+| `feature:dump` | Dumps feature flags for the frontend |
+
+## Enabling XDebug
+
+To enable XDebug in the Docker setup, create a `compose.override.yaml` file in the project root:
+
+```yaml
+services:
+    web:
+        environment:
+            - XDEBUG_MODE=debug
+            - XDEBUG_CONFIG=client_host=host.docker.internal
+            - PHP_PROFILER=xdebug
+```
+
+Then apply the override:
+
+```bash
+docker compose up -d
+```
+
+The same file supports `blackfire`, `tideways`, and `pcov` as alternative profilers via the `PHP_PROFILER` variable.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Make your first Store API call and create a minimal plugin.
+  </Card>
+  <Card title="Architecture overview" icon="sitemap" href="/architecture/overview">
+    Learn how the DAL, event system, and Sales Channels work.
+  </Card>
+  <Card title="Plugins" icon="plug" href="/extensions/plugins">
+    Build a Symfony bundle plugin that extends Shopware's behavior.
+  </Card>
+  <Card title="Apps" icon="puzzle-piece" href="/extensions/apps">
+    Create a manifest-based App that works with cloud-hosted Shopware.
+  </Card>
+</CardGroup>

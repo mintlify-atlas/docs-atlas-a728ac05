@@ -1,0 +1,242 @@
+---
+title: "Admin API: manage orders and transactions"
+description: "Use the Shopware Admin API to query orders, load line items, deliveries, and transactions, and drive order state transitions via the state machine."
+---
+
+The order endpoints provide read and update access to the order lifecycle. Orders are created by customers through the storefront or Store API; the Admin API is used to query, annotate, and fulfill them. All requests require a Bearer token from `/api/oauth/token`.
+
+<Warning>
+  Order financial amounts (`amountTotal`, `amountNet`, `positionPrice`) are write-protected and recalculated automatically. Do not attempt to set them directly.
+</Warning>
+
+## List orders
+
+Use the search endpoint to filter and sort orders. Load associations inline to avoid additional round-trips.
+
+<CodeGroup>
+
+```bash GET /api/order
+curl -X POST https://your-shop.example.com/api/search/order \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 20,
+    "page": 1,
+    "sort": [{ "field": "orderDateTime", "order": "DESC" }],
+    "associations": {
+      "orderCustomer": {},
+      "stateMachineState": {},
+      "lineItems": {},
+      "transactions": {},
+      "deliveries": {}
+    }
+  }'
+```
+
+</CodeGroup>
+
+<ResponseField name="total" type="integer">
+  Total number of orders matching the criteria.
+</ResponseField>
+
+<ResponseField name="data" type="Order[]">
+  Array of order objects.
+
+  <ResponseField name="id" type="string (uuid)">
+    Unique identifier of the order.
+  </ResponseField>
+
+  <ResponseField name="orderNumber" type="string">
+    Human-readable order number (e.g. `10001`).
+  </ResponseField>
+
+  <ResponseField name="orderDateTime" type="string (ISO 8601)">
+    Timestamp when the order was placed.
+  </ResponseField>
+
+  <ResponseField name="amountTotal" type="number">
+    Gross total including taxes and shipping.
+  </ResponseField>
+
+  <ResponseField name="amountNet" type="number">
+    Net total excluding taxes.
+  </ResponseField>
+
+  <ResponseField name="taxStatus" type="string">
+    One of `gross`, `net`, or `tax-free`.
+  </ResponseField>
+
+  <ResponseField name="currencyId" type="string (uuid)">
+    ID of the order currency.
+  </ResponseField>
+
+  <ResponseField name="salesChannelId" type="string (uuid)">
+    Sales channel through which the order was placed.
+  </ResponseField>
+
+  <ResponseField name="stateMachineState" type="object">
+    Current state of the order (e.g. `open`, `in_progress`, `completed`, `cancelled`).
+  </ResponseField>
+</ResponseField>
+
+---
+
+## Get an order with associations
+
+Fetch a single order and include all related data required to fulfill it.
+
+<CodeGroup>
+
+```bash GET /api/order/{id}
+curl "https://your-shop.example.com/api/order/{id}?associations[lineItems][]=&associations[transactions][]=&associations[deliveries][]=&associations[orderCustomer][]=" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+</CodeGroup>
+
+### Line items
+
+The `lineItems` association returns each product, discount, or fee in the order.
+
+<ResponseField name="lineItems" type="OrderLineItem[]">
+  <ResponseField name="id" type="string (uuid)">
+    Unique identifier of the line item.
+  </ResponseField>
+  <ResponseField name="label" type="string">
+    Display name of the line item.
+  </ResponseField>
+  <ResponseField name="quantity" type="integer">
+    Number of units ordered.
+  </ResponseField>
+  <ResponseField name="unitPrice" type="number">
+    Price per unit at time of order.
+  </ResponseField>
+  <ResponseField name="totalPrice" type="number">
+    `unitPrice × quantity`.
+  </ResponseField>
+  <ResponseField name="type" type="string">
+    Line item type: `product`, `promotion`, `credit`, `custom`, or `container`.
+  </ResponseField>
+</ResponseField>
+
+### Transactions
+
+<ResponseField name="transactions" type="OrderTransaction[]">
+  <ResponseField name="id" type="string (uuid)">
+    Unique identifier of the transaction.
+  </ResponseField>
+  <ResponseField name="amount" type="object">
+    Calculated price object containing `totalPrice`, `taxRules`, and `calculatedTaxes`.
+  </ResponseField>
+  <ResponseField name="stateMachineState" type="object">
+    Payment state: `open`, `paid`, `paid_partially`, `refunded`, `cancelled`, `failed`.
+  </ResponseField>
+  <ResponseField name="paymentMethodId" type="string (uuid)">
+    Payment method used for this transaction.
+  </ResponseField>
+</ResponseField>
+
+### Deliveries
+
+<ResponseField name="deliveries" type="OrderDelivery[]">
+  <ResponseField name="id" type="string (uuid)">
+    Unique identifier of the delivery.
+  </ResponseField>
+  <ResponseField name="stateMachineState" type="object">
+    Delivery state: `open`, `shipped`, `shipped_partially`, `returned`, `cancelled`.
+  </ResponseField>
+  <ResponseField name="trackingCodes" type="string[]">
+    Carrier tracking numbers.
+  </ResponseField>
+  <ResponseField name="shippingDateEarliest" type="string (ISO 8601)">
+    Earliest expected shipping date.
+  </ResponseField>
+  <ResponseField name="shippingDateLatest" type="string (ISO 8601)">
+    Latest expected shipping date.
+  </ResponseField>
+</ResponseField>
+
+---
+
+## Transition order state
+
+Order state is managed by Shopware's state machine. Use the `_action/state-machine` endpoint to drive transitions.
+
+<CodeGroup>
+
+```bash PATCH order state
+curl -X POST \
+  "https://your-shop.example.com/api/_action/state-machine/order/{orderId}/state/{transition}" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "documentIds": [],
+    "mediaIds": [],
+    "sendMail": true
+  }'
+```
+
+</CodeGroup>
+
+<ParamField path="orderId" type="string (uuid)" required>
+  ID of the order whose state you want to change.
+</ParamField>
+
+<ParamField path="transition" type="string" required>
+  The state machine transition to trigger. Common values:
+
+  | Transition | Result state |
+  |---|---|
+  | `process` | `in_progress` |
+  | `complete` | `completed` |
+  | `cancel` | `cancelled` |
+  | `reopen` | `open` |
+</ParamField>
+
+<ParamField body="sendMail" type="boolean" default="true">
+  Whether to send the customer a state-change notification email.
+</ParamField>
+
+### Transition payment state
+
+```bash
+curl -X POST \
+  "https://your-shop.example.com/api/_action/state-machine/order_transaction/{transactionId}/state/{transition}" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "sendMail": false }'
+```
+
+Common payment transitions: `pay`, `pay_partially`, `refund`, `refund_partially`, `cancel`, `fail`, `reopen`.
+
+### Transition delivery state
+
+```bash
+curl -X POST \
+  "https://your-shop.example.com/api/_action/state-machine/order_delivery/{deliveryId}/state/{transition}" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "sendMail": false }'
+```
+
+Common delivery transitions: `ship`, `ship_partially`, `return`, `return_partially`, `cancel`, `reopen`.
+
+---
+
+## Update order fields
+
+You can update non-write-protected fields such as `affiliateCode`, `campaignCode`, `customerComment`, or `internalComment` via PATCH.
+
+<CodeGroup>
+
+```bash PATCH /api/order/{id}
+curl -X PATCH https://your-shop.example.com/api/order/{id} \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "internalComment": "Customer requested gift wrapping.",
+    "affiliateCode": "PARTNER42"
+  }'
+```
+
+</CodeGroup>

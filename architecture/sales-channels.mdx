@@ -1,0 +1,252 @@
+---
+title: "Sales Channels: multi-storefront management"
+description: "How Shopware's Sales Channel system enables multiple storefronts and headless APIs, each with its own language, currency, and payment method configuration."
+---
+
+A Sales Channel is Shopware's unit of distribution: a configured combination of domain, language, currency, payment methods, and shipping methods that together define one customer-facing outlet. A single Shopware installation can run any number of sales channels simultaneously — a German storefront, an English headless API, an export feed, and a POS terminal can all coexist and share the same product catalog while presenting it differently to each audience. This page explains how sales channels are structured, what types exist, and how the `SalesChannelContext` object carries all channel-specific state through a request.
+
+## What is a Sales Channel?
+
+`SalesChannelEntity` (`src/Core/System/SalesChannel/SalesChannelEntity.php`) is a first-class DAL entity. Its definition (`SalesChannelDefinition`) includes:
+
+| Field | Purpose |
+|-------|---------|
+| `accessKey` | Secret used in the `sw-access-key` header to authenticate Store API requests |
+| `typeId` | Determines the channel type (Storefront, Headless, Google Shopping, etc.) |
+| `languageId` | Default language for the channel |
+| `currencyId` | Default currency |
+| `paymentMethodId` | Default payment method |
+| `shippingMethodId` | Default shipping method |
+| `countryId` | Default country for tax and shipping calculation |
+| `navigationCategoryId` | Root category for the main navigation menu |
+| `domains` | One-to-many collection of `SalesChannelDomainEntity` (URL + language + currency per domain) |
+| `active` | Whether the channel is live |
+| `maintenance` | Whether the channel is in maintenance mode |
+
+Each domain entry associates a full URL with a specific language and currency, so a single sales channel can serve `shop.example.com/en` and `shop.example.com/de` with automatic locale switching.
+
+## Sales Channel types
+
+Shopware ships three built-in type IDs (defined in `Defaults`):
+
+<CardGroup cols={2}>
+  <Card title="Storefront" icon="globe">
+    The Twig-rendered storefront. Routes are handled by Storefront controllers that call Store API routes internally. Supports themes, CMS pages, and SEO URLs.
+  </Card>
+  <Card title="Headless (API)" icon="code">
+    A pure Store API channel with no server-side rendering. Clients (mobile apps, React/Next.js frontends) authenticate with the access key and call `/store-api/` directly.
+  </Card>
+  <Card title="Product Comparison / Export" icon="download">
+    Generates product export feeds (Google Shopping, price comparison portals). Configured via `ProductExportDefinition`.
+  </Card>
+  <Card title="Custom" icon="settings">
+    Third-party bundles (e.g., POS systems) register their own type ID and handle their own rendering and API surface.
+  </Card>
+</CardGroup>
+
+## Access keys and Store API scoping
+
+Every Store API request must include the sales channel's access key:
+
+```http
+GET /store-api/product HTTP/1.1
+sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX
+Content-Type: application/json
+```
+
+Shopware resolves the sales channel from this key and constructs a `SalesChannelContext` for the request. All subsequent logic — price calculation, available payment methods, active language — is scoped to that channel. You cannot accidentally read data from a different channel.
+
+<Warning>
+The `accessKey` is stored in plain text and is not a secret in the traditional sense — it identifies the channel, not a specific customer. Customer authentication uses a separate `sw-context-token` header and a Bearer JWT for admin operations.
+</Warning>
+
+## SalesChannelContext
+
+`SalesChannelContext` (`src/Core/System/SalesChannel/SalesChannelContext.php`) is the central carrier object for all storefront requests. It wraps a base `Context` and adds everything specific to the current channel, customer session, and locale.
+
+### Constructor fields
+
+```php
+public function __construct(
+    protected Context $context,           // Base framework context
+    protected string $token,              // Session/cart token
+    private ?string $domainId,            // Active domain ID
+    protected SalesChannelEntity $salesChannel,
+    protected CurrencyEntity $currency,
+    protected CustomerGroupEntity $currentCustomerGroup,
+    protected TaxCollection $taxRules,
+    protected PaymentMethodEntity $paymentMethod,
+    protected ShippingMethodEntity $shippingMethod,
+    protected ShippingLocation $shippingLocation,
+    protected ?CustomerEntity $customer,   // null for guests
+    protected CashRoundingConfig $itemRounding,
+    protected CashRoundingConfig $totalRounding,
+    protected LanguageInfo $languageInfo,
+    protected array $areaRuleIds = [],
+)
+```
+
+### Commonly used accessors
+
+```php
+// Get the sales channel entity
+$salesChannel = $salesChannelContext->getSalesChannel();
+$salesChannelId = $salesChannelContext->getSalesChannelId();
+
+// Language and currency
+$languageId = $salesChannelContext->getLanguageId();
+$languageChain = $salesChannelContext->getLanguageIdChain(); // for translation fallback
+$currency = $salesChannelContext->getCurrency();
+
+// Customer (null for anonymous/guest sessions)
+$customer = $salesChannelContext->getCustomer();
+$customerId = $salesChannelContext->getCustomerId(); // null if not logged in
+
+// Payment and shipping
+$paymentMethod = $salesChannelContext->getPaymentMethod();
+$shippingMethod = $salesChannelContext->getShippingMethod();
+
+// Tax
+$taxState = $salesChannelContext->getTaxState(); // gross or net
+$taxRules = $salesChannelContext->buildTaxRules($taxId);
+
+// The underlying base Context for DAL operations
+$context = $salesChannelContext->getContext();
+```
+
+### Using SalesChannelContext in a Store API route
+
+Inject `SalesChannelContext` as a method argument on any Store API controller action or route class. Symfony resolves it automatically via the `SalesChannelContextValueResolver`:
+
+```php
+<?php declare(strict_types=1);
+
+namespace MyPlugin\SalesChannel;
+
+use Shopware\Core\System\SalesChannel\SalesChannelContext;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Routing\Attribute\Route;
+
+#[Route(defaults: ['_routeScope' => ['store-api']])]
+class BlogPostRoute
+{
+    public function __construct(
+        private readonly EntityRepository $blogPostRepository
+    ) {}
+
+    #[Route(path: '/store-api/blog', name: 'store-api.blog.list', methods: ['GET', 'POST'])]
+    public function load(Request $request, SalesChannelContext $context): BlogPostRouteResponse
+    {
+        $criteria = new Criteria();
+        $criteria->addFilter(
+            new EqualsFilter('salesChannelId', $context->getSalesChannelId())
+        );
+
+        $result = $this->blogPostRepository->search($criteria, $context->getContext());
+
+        return new BlogPostRouteResponse($result);
+    }
+}
+```
+
+## Per-channel configuration
+
+Each sales channel stores its own:
+
+- **Languages** — the set of languages available for the channel, with one default (`languageId`). Additional languages are linked via `SalesChannelLanguageDefinition`.
+- **Currencies** — the set of accepted currencies, with one default. Exchange rate factor is stored on `CurrencyEntity`.
+- **Countries** — the list of countries available for shipping and billing addresses.
+- **Payment methods** — linked via `SalesChannelPaymentMethodDefinition`; the active set is used to populate the checkout payment selection.
+- **Shipping methods** — linked via `SalesChannelShippingMethodDefinition`.
+- **System configs** — `SystemConfigDefinition` records can be scoped to a sales channel by setting their `salesChannelId`. Channel-scoped configs override global defaults.
+
+```php
+// Reading a system config scoped to a specific sales channel
+$value = $this->systemConfigService->get(
+    'MyPlugin.config.featureEnabled',
+    $salesChannelContext->getSalesChannelId()
+);
+```
+
+## Customer authentication and the context token
+
+The `sw-context-token` header identifies the customer's session and ties their cart, wishlist, and login state to the sales channel. The token is issued by the `/store-api/account/login` endpoint and must be passed on every subsequent request.
+
+```http
+POST /store-api/account/login HTTP/1.1
+sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX
+Content-Type: application/json
+
+{"username": "customer@example.com", "password": "secret"}
+```
+
+Response:
+
+```json
+{
+  "contextToken": "abc123...",
+  "redirectUrl": null
+}
+```
+
+Subsequent requests:
+
+```http
+GET /store-api/account/customer HTTP/1.1
+sw-access-key: SWSCXXXXXXXXXXXXXXXXXXXXXXXX
+sw-context-token: abc123...
+```
+
+<Note>
+The context token is distinct from the access key. The access key identifies the sales channel; the context token identifies the customer session within that channel.
+</Note>
+
+## Checking customer login state
+
+```php
+public function someAction(SalesChannelContext $context): void
+{
+    // Returns null for guests and anonymous sessions
+    if ($context->getCustomer() === null) {
+        throw SalesChannelException::customerNotLoggedIn();
+    }
+
+    // Or use the built-in helper (throws if not logged in)
+    $context->ensureLoggedIn();
+
+    // For operations that also accept guest checkouts
+    $context->ensureLoggedIn(allowGuest: true);
+}
+```
+
+## Scoped permissions
+
+Some operations require elevated permissions within a sales channel request. Use `withPermissions()` to temporarily grant permissions for a callback:
+
+```php
+$result = $salesChannelContext->withPermissions(
+    ['category:read' => true],
+    function (SalesChannelContext $ctx) {
+        return $this->categoryRepository->search($criteria, $ctx->getContext());
+    }
+);
+```
+
+## Multi-language and multi-currency example
+
+When a customer switches language or currency, Shopware creates a new `SalesChannelContext` with the updated values and issues a new context token. The DAL automatically uses `getLanguageIdChain()` from the context for translation resolution — you do not need to write language-specific queries:
+
+```php
+// The DAL resolves the correct translation based on the language chain
+$criteria = new Criteria([$productId]);
+$criteria->addAssociation('translations');
+
+$product = $this->productRepository->search($criteria, $salesChannelContext->getContext())
+    ->first();
+
+// Returns the translated name for the context's active language
+$name = $product->getName();
+```
+
+The language chain is ordered: if a translation does not exist in the primary language, the DAL falls back to the next language in the chain (typically the system default).

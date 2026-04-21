@@ -1,0 +1,244 @@
+---
+title: "Create and customize Shopware themes"
+description: "Customize the Shopware Storefront by overriding SCSS variables, extending Twig blocks, and configuring theme.json with the built-in theme inheritance system."
+---
+
+Shopware's theme system is built on top of the Storefront plugin and gives you a structured way to change the look and feel of a shop without touching core files. A theme is a special type of Storefront plugin that declares itself via a `theme.json` configuration file. Shopware compiles SCSS, merges Twig templates, and resolves asset paths through the `ThemeCompiler` and `ThemeFileResolver` — the directory listing under `src/Storefront/Theme/` shows every moving part of that pipeline.
+
+## How the theme system works
+
+When a sales channel is assigned a theme, Shopware resolves the full inheritance chain and builds a combined set of SCSS variables, JavaScript entry points, and Twig template paths. The `ThemeMergedConfigBuilder` merges configuration from every theme in the chain, and the `ThemeCompiler` hands the result to `ScssPhpCompiler` to produce a single CSS bundle.
+
+The resolution order from lowest to highest priority is:
+
+1. `Storefront` (base theme, always present)
+2. Parent themes (declared in `theme.json`)
+3. Your theme (highest priority)
+
+The `ThemeEntity` and `ThemeDefinition` classes in the `Theme/` directory back the `theme` DAL entity, while `StorefrontPluginRegistry` is responsible for discovering which bundles register themselves as themes.
+
+## theme.json configuration
+
+Place `theme.json` at `src/Resources/` inside your Storefront plugin. The file drives everything from variable defaults to the assets Webpack should compile.
+
+```json
+{
+  "name": "AcmeTheme",
+  "author": "Acme GmbH",
+  "views": [
+    "@Storefront",
+    "@Plugins",
+    "@AcmeTheme"
+  ],
+  "style": [
+    "app/storefront/src/scss/overrides.scss",
+    "@Storefront"
+  ],
+  "script": [
+    "@Storefront",
+    "app/storefront/src/main.js"
+  ],
+  "asset": [
+    "app/storefront/dist/storefront/assets"
+  ],
+  "config": {
+    "blocks": {
+      "colors": {
+        "label": {
+          "en-GB": "Colours",
+          "de-DE": "Farben"
+        }
+      }
+    },
+    "fields": {
+      "sw-color-brand-primary": {
+        "label": {
+          "en-GB": "Primary colour",
+          "de-DE": "Primärfarbe"
+        },
+        "type": "color",
+        "value": "#2a7ae4",
+        "editable": true,
+        "block": "colors"
+      },
+      "sw-color-brand-secondary": {
+        "label": {
+          "en-GB": "Secondary colour"
+        },
+        "type": "color",
+        "value": "#526e7a",
+        "editable": true,
+        "block": "colors"
+      },
+      "sw-font-family-base": {
+        "label": {
+          "en-GB": "Base font family"
+        },
+        "type": "fontFamily",
+        "value": "'Inter', sans-serif",
+        "editable": true,
+        "block": "colors"
+      }
+    }
+  },
+  "previewMedia": "app/storefront/dist/storefront/assets/preview.png"
+}
+```
+
+<Note>
+  The `views` array controls Twig template resolution order. Putting `@AcmeTheme` last means your templates override both the Storefront base and any installed plugins. Swap the order if you want plugins to override your theme instead.
+</Note>
+
+## SCSS variable overrides
+
+The Storefront exposes hundreds of Bootstrap and Shopware-specific SCSS variables. Override them in a file you list **before** `@Storefront` in the `style` array so that your values are in scope when the base SCSS is compiled.
+
+```scss
+// app/storefront/src/scss/overrides.scss
+
+// --- Bootstrap grid ---
+$grid-gutter-width: 24px;
+$container-max-widths: (
+  sm: 540px,
+  md: 720px,
+  lg: 960px,
+  xl: 1200px,
+  xxl: 1440px
+);
+
+// --- Shopware brand colours ---
+$sw-color-brand-primary:   #2a7ae4;
+$sw-color-brand-secondary: #526e7a;
+$sw-color-success:         #37b56d;
+$sw-color-warning:         #f5a623;
+$sw-color-danger:          #e53935;
+
+// --- Typography ---
+$font-family-base:    'Inter', #{$font-family-sans-serif};
+$font-size-base:      1rem;
+$line-height-base:    1.6;
+$headings-font-weight: 600;
+
+// --- Buttons ---
+$btn-border-radius:   4px;
+$btn-font-weight:     600;
+```
+
+<Tip>
+  Variables declared in your `overrides.scss` are available throughout the entire SCSS compilation, including inside `@Storefront` and plugin stylesheets. You do not need to import the base variables yourself.
+</Tip>
+
+## Twig block inheritance
+
+Shopware's Twig loader resolves templates through the inheritance chain. To override a block, create a file at the same relative path as the original template and use `{% sw_extends %}`:
+
+```twig
+{# src/Resources/views/storefront/layout/header/header.html.twig #}
+
+{% sw_extends '@Storefront/storefront/layout/header/header.html.twig' %}
+
+{% block layout_header_inner %}
+    <div class="acme-announcement-bar">
+        Free shipping on orders over €50
+    </div>
+    {{ parent() }}
+{% endblock %}
+```
+
+For deeper overrides, extend the specific component template and override only the block you need:
+
+```twig
+{# src/Resources/views/storefront/component/product/card/box-standard.html.twig #}
+
+{% sw_extends '@Storefront/storefront/component/product/card/box-standard.html.twig' %}
+
+{% block component_product_box_image %}
+    <div class="acme-product-badge">New</div>
+    {{ parent() }}
+{% endblock %}
+```
+
+<Warning>
+  Use `{{ parent() }}` inside blocks whenever you want the original content to remain. Omitting it replaces the block entirely, which can break other plugins that also extend the same block.
+</Warning>
+
+## Theme inheritance chain
+
+A theme can declare a parent theme to inherit all of its variables and templates while selectively overriding them. Use the `inheritanceDepth` concept by listing `@ParentTheme` in your `views` and `style` arrays:
+
+```json
+{
+  "name": "AcmeChildTheme",
+  "style": [
+    "app/storefront/src/scss/overrides.scss",
+    "@AcmeTheme"
+  ],
+  "views": [
+    "@Storefront",
+    "@Plugins",
+    "@AcmeTheme",
+    "@AcmeChildTheme"
+  ]
+}
+```
+
+The `ThemeMergedConfigBuilder` walks this chain and merges `config.fields` so child themes can override individual variable values through the Admin theme configurator without touching SCSS.
+
+## Asset compilation
+
+Shopware uses Webpack via the `ThemeCompiler` to bundle assets. Run the compiler whenever you change SCSS or JavaScript:
+
+<Tabs>
+  <Tab title="Development (watch)">
+    ```bash
+    # Recompiles on every file change
+    bin/console storefront:build --watch
+    ```
+  </Tab>
+  <Tab title="Production">
+    ```bash
+    # Full production build with minification
+    bin/console storefront:build
+    bin/console theme:compile
+    ```
+  </Tab>
+  <Tab title="Assign theme to sales channel">
+    ```bash
+    # List available themes
+    bin/console theme:info
+
+    # Assign to a sales channel by ID
+    bin/console theme:change --sales-channel=<sales-channel-id> AcmeTheme
+
+    # Compile after assignment
+    bin/console theme:compile
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  The compiled assets are stored in `public/theme/{themeId}/` and keyed by a path hash generated by `MD5ThemePathBuilder` or `SeedingThemePathBuilder`. Shopware's `ThemeAssetPackage` rewrites asset URLs to point to these compiled paths automatically.
+</Note>
+
+## Registering the theme plugin class
+
+Your Storefront plugin class must call `addTheme()` on the plugin's bundle to make Shopware aware that it is a theme:
+
+```php
+<?php declare(strict_types=1);
+
+namespace Acme\AcmeTheme;
+
+use Shopware\Storefront\Framework\ThemeInterface;
+use Shopware\Core\Framework\Plugin;
+
+class AcmeTheme extends Plugin implements ThemeInterface
+{
+    public function getThemeConfigPath(): string
+    {
+        return 'theme.json';
+    }
+}
+```
+
+Implementing `ThemeInterface` tells `StorefrontPluginRegistry` to include your bundle in the theme chain and pick up `theme.json` from `src/Resources/`.

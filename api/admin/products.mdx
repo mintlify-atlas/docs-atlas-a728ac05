@@ -1,0 +1,240 @@
+---
+title: "Admin API: manage products and catalog"
+description: "Use the Shopware Admin API to create, read, update, and delete products, manage pricing, stock levels, and perform bulk catalog operations via the Sync API."
+---
+
+The product endpoints give you full CRUD access to your catalog. Every request must include a Bearer token obtained from `/api/oauth/token`. Product fields support inheritance—variant products inherit unset fields from their parent.
+
+## List products
+
+Retrieve a paginated list of products. Use the `associations` body parameter to load related data such as `manufacturer`, `categories`, or `media`.
+
+<CodeGroup>
+
+```bash GET /api/product
+curl -X POST https://your-shop.example.com/api/search/product \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 25,
+    "page": 1,
+    "filter": [
+      { "type": "equals", "field": "active", "value": true }
+    ],
+    "associations": {
+      "manufacturer": {},
+      "categories": {}
+    }
+  }'
+```
+
+</CodeGroup>
+
+<ResponseField name="total" type="integer">
+  Total number of matching products.
+</ResponseField>
+
+<ResponseField name="data" type="Product[]">
+  Array of product objects.
+
+  <ResponseField name="id" type="string (uuid)">
+    Unique identifier of the product.
+  </ResponseField>
+
+  <ResponseField name="productNumber" type="string">
+    Unique product number (e.g. `SW10001`).
+  </ResponseField>
+
+  <ResponseField name="name" type="string">
+    Translated product name.
+  </ResponseField>
+
+  <ResponseField name="stock" type="integer">
+    Current inventory count.
+  </ResponseField>
+
+  <ResponseField name="active" type="boolean">
+    Whether the product is visible and purchasable in the storefront.
+  </ResponseField>
+
+  <ResponseField name="price" type="Price[]">
+    Array of currency-specific gross/net prices.
+  </ResponseField>
+</ResponseField>
+
+---
+
+## Get a single product
+
+```bash
+curl https://your-shop.example.com/api/product/{id} \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+## Create a product
+
+<CodeGroup>
+
+```bash POST /api/product
+curl -X POST https://your-shop.example.com/api/product \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Running Shoe Pro",
+    "productNumber": "RS-1001",
+    "stock": 50,
+    "taxId": "b7d2554b0ce847cd82f3ac9bd1c0dfca",
+    "price": [
+      {
+        "currencyId": "b7d2554b0ce847cd82f3ac9bd1c0dfca",
+        "gross": 99.99,
+        "net": 84.03,
+        "linked": true
+      }
+    ],
+    "active": true
+  }'
+```
+
+</CodeGroup>
+
+### Required fields
+
+<ParamField body="name" type="string" required>
+  Translated product name. Provided as a plain string; stored as a translation for the default language.
+</ParamField>
+
+<ParamField body="productNumber" type="string" required>
+  Unique catalog number. Must be unique across all products.
+</ParamField>
+
+<ParamField body="stock" type="integer" required>
+  Initial inventory quantity. Must be `0` or greater.
+</ParamField>
+
+<ParamField body="taxId" type="string (uuid)" required>
+  ID of the tax rule to apply. Retrieve available tax IDs via `GET /api/tax`.
+</ParamField>
+
+<ParamField body="price" type="Price[]" required>
+  Array of price objects, one per currency.
+
+  <ParamField body="currencyId" type="string (uuid)" required>
+    ID of the currency this price applies to.
+  </ParamField>
+
+  <ParamField body="gross" type="number" required>
+    Gross (tax-inclusive) price.
+  </ParamField>
+
+  <ParamField body="net" type="number" required>
+    Net (tax-exclusive) price.
+  </ParamField>
+
+  <ParamField body="linked" type="boolean">
+    When `true`, net price is recalculated automatically from gross and the tax rate.
+  </ParamField>
+</ParamField>
+
+### Optional fields
+
+<ParamField body="active" type="boolean" default="true">
+  Set to `false` to hide the product from the storefront without deleting it.
+</ParamField>
+
+<ParamField body="manufacturerId" type="string (uuid)">
+  Links the product to an existing manufacturer record.
+</ParamField>
+
+<ParamField body="ean" type="string">
+  European Article Number (barcode).
+</ParamField>
+
+<ParamField body="manufacturerNumber" type="string">
+  Manufacturer's own part number.
+</ParamField>
+
+<ParamField body="weight" type="number">
+  Product weight in kilograms.
+</ParamField>
+
+<ParamField body="releaseDate" type="string (ISO 8601)">
+  Scheduled release date, e.g. `2025-06-01T00:00:00.000Z`.
+</ParamField>
+
+---
+
+## Update a product
+
+Send only the fields you want to change. All other fields remain unchanged.
+
+<CodeGroup>
+
+```bash PATCH /api/product/{id}
+curl -X PATCH https://your-shop.example.com/api/product/{id} \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stock": 120,
+    "active": false
+  }'
+```
+
+</CodeGroup>
+
+---
+
+## Delete a product
+
+```bash
+curl -X DELETE https://your-shop.example.com/api/product/{id} \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Returns `204 No Content` on success. Deleting a parent product also removes all variants (cascade).
+
+---
+
+## Bulk upsert via the Sync API
+
+The Sync API lets you create or update many products in a single request, reducing round-trips for large catalog imports.
+
+<CodeGroup>
+
+```bash POST /api/_action/sync
+curl -X POST https://your-shop.example.com/api/_action/sync \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "product-upsert": {
+      "entity": "product",
+      "action": "upsert",
+      "payload": [
+        {
+          "id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+          "name": "Trail Boot X",
+          "productNumber": "TB-2001",
+          "stock": 30,
+          "taxId": "b7d2554b0ce847cd82f3ac9bd1c0dfca",
+          "price": [
+            {
+              "currencyId": "b7d2554b0ce847cd82f3ac9bd1c0dfca",
+              "gross": 149.00,
+              "net": 125.21,
+              "linked": true
+            }
+          ],
+          "active": true
+        }
+      ]
+    }
+  }'
+```
+
+</CodeGroup>
+
+<Note>
+  Provide an `id` in each payload object to perform an upsert. If the ID already exists the record is updated; otherwise a new product is created.
+</Note>

@@ -1,0 +1,215 @@
+---
+title: "Shopware Elasticsearch and OpenSearch integration"
+description: "Configure OpenSearch 2 or Elasticsearch 8 in Shopware to replace the DAL for product and category search, with custom field indexing and Admin search support."
+---
+
+The `Elasticsearch` bundle replaces Shopware's default MySQL-backed DAL search with a dedicated search engine for entities that benefit from full-text and relevance-ranked queries — most importantly products and categories. Once enabled, search and filter requests for indexed entities are routed to the search cluster instead of the database.
+
+<Note>
+  Shopware supports **OpenSearch 2** and **Elasticsearch 8**. Both use the same configuration surface. OpenSearch is the recommended backend for new installations.
+</Note>
+
+## Enabling the integration
+
+<Steps>
+  <Step title="Install a search cluster">
+    Run OpenSearch or Elasticsearch locally or use a managed service. The cluster must be reachable from your Shopware application server.
+
+    ```bash
+    # Quick local OpenSearch with Docker
+    docker run -d --name opensearch \
+      -e "discovery.type=single-node" \
+      -e "DISABLE_SECURITY_PLUGIN=true" \
+      -p 9200:9200 \
+      opensearchproject/opensearch:2
+    ```
+  </Step>
+
+  <Step title="Set environment variables">
+    Add the following variables to your `.env` or server environment:
+
+    ```bash
+    OPENSEARCH_URL=http://localhost:9200
+    SHOPWARE_ES_ENABLED=1
+    SHOPWARE_ES_INDEXING_ENABLED=1
+    SHOPWARE_ES_INDEX_PREFIX=sw
+    ```
+
+    | Variable | Description |
+    |---|---|
+    | `OPENSEARCH_URL` | Full URL to your cluster (also accepts `ELASTICSEARCH_URL`) |
+    | `SHOPWARE_ES_ENABLED` | Routes live search queries through the cluster |
+    | `SHOPWARE_ES_INDEXING_ENABLED` | Allows the indexer to write to the cluster |
+    | `SHOPWARE_ES_INDEX_PREFIX` | Prefix for all index names (avoids collisions on shared clusters) |
+
+    <Warning>
+      Set both `SHOPWARE_ES_ENABLED` and `SHOPWARE_ES_INDEXING_ENABLED` to `1`. Enabling only one will cause searches to hit an empty or stale index.
+    </Warning>
+  </Step>
+
+  <Step title="Run the initial indexing">
+    ```bash
+    bin/console es:index
+    ```
+
+    This command creates index aliases, maps fields, and populates the index for all registered definitions (products, categories, etc.). For large catalogs, indexing runs asynchronously via the message queue — ensure workers are running.
+
+    ```bash
+    bin/console messenger:consume async --time-limit=3600
+    ```
+  </Step>
+
+  <Step title="Verify">
+    ```bash
+    bin/console es:index:cleanup   # remove outdated indices
+    bin/console es:status          # shows index health and document counts
+    ```
+  </Step>
+</Steps>
+
+## Product indexing
+
+The `Product` definition ships a built-in Elasticsearch definition under `Shopware\Elasticsearch\Product`. It indexes:
+
+- Core fields: `id`, `name`, `description`, `productNumber`, `ean`, `manufacturerNumber`
+- Relations: `manufacturer.name`, `categories.name`, `tags.name`
+- Pricing: `price`, `cheapestPrice`
+- Custom fields assigned to products
+
+When a product is created or updated via the DAL, Shopware dispatches an indexing message. The worker picks it up and re-indexes the affected documents.
+
+To trigger a full re-index manually:
+
+```bash
+bin/console es:index --no-queue   # synchronous, blocks until complete
+```
+
+<Note>
+  The `--no-queue` flag indexes synchronously in the CLI process. Only use it for small catalogs or during initial setup. For production, remove the flag and let the message queue distribute the work.
+</Note>
+
+## Custom field indexing
+
+Custom fields added to product or category definitions are indexed automatically if the custom field set is marked as searchable in the Admin UI or via API.
+
+To control which custom fields are indexed, register your own `AbstractElasticsearchDefinition`:
+
+```php
+use Shopware\Elasticsearch\Framework\AbstractElasticsearchDefinition;
+use Shopware\Core\Framework\DataAbstractionLayer\EntityDefinition;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Shopware\Core\Framework\Context;
+use OpenSearchDSL\BuilderInterface;
+
+class MyProductElasticsearchDefinition extends AbstractElasticsearchDefinition
+{
+    public function __construct(private readonly EntityDefinition $definition) {}
+
+    public function getEntityDefinition(): EntityDefinition
+    {
+        return $this->definition;
+    }
+
+    public function getMapping(Context $context): array
+    {
+        return [
+            'properties' => [
+                'customFields' => [
+                    'properties' => [
+                        'my_custom_rating' => self::FLOAT_FIELD,
+                        'my_custom_label'  => self::getTextFieldConfig(),
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    public function buildTermQuery(Context $context, Criteria $criteria): BuilderInterface
+    {
+        // delegate to the default term query builder or implement custom logic
+    }
+}
+```
+
+Register the definition as a service and tag it:
+
+```yaml
+# config/services.yaml
+MyProductElasticsearchDefinition:
+  arguments:
+    $definition: '@Shopware\Core\Content\Product\ProductDefinition'
+  tags:
+    - { name: shopware.es.definition }
+```
+
+Available field type constants from `AbstractElasticsearchDefinition`:
+
+| Constant | ES type |
+|---|---|
+| `KEYWORD_FIELD` | `keyword` with lowercase normalizer |
+| `BOOLEAN_FIELD` | `boolean` |
+| `FLOAT_FIELD` | `double` |
+| `INT_FIELD` | `long` |
+| `SEARCH_FIELD` | `text` with whitespace + ngram analyzers |
+
+## Admin search integration
+
+The `Admin/` module provides a separate search layer for the Shopware Admin UI (`/api/_action/search`). It allows searching across multiple entity types (products, orders, customers, etc.) in a single request.
+
+Admin search uses its own set of indexers under `Shopware\Elasticsearch\Admin\Indexer\`. Each indexer defines which fields are indexed and how results are ranked for the Admin global search bar.
+
+Enable Admin search with:
+
+```bash
+SHOPWARE_ADMIN_ES_ENABLED=1
+SHOPWARE_ADMIN_ES_INDEX_PREFIX=sw-admin
+SHOPWARE_ADMIN_ES_REFRESH_INDICES=1  # optional: synchronous index refresh
+```
+
+Trigger Admin index build:
+
+```bash
+bin/console es:admin:index
+```
+
+<Note>
+  Admin search and storefront/product search use separate indices. Setting `SHOPWARE_ES_ENABLED=1` does **not** enable Admin search — you must also set `SHOPWARE_ADMIN_ES_ENABLED=1`.
+</Note>
+
+## Criteria and Elasticsearch awareness
+
+By default, some `Criteria` queries bypass Elasticsearch and go directly to MySQL (e.g., queries with post-filters or certain aggregation types that are not yet mapped). You can explicitly mark a `Criteria` instance as Elasticsearch-aware:
+
+```php
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+
+$criteria = new Criteria();
+$criteria->addState(Criteria::STATE_ELASTICSEARCH_AWARE);
+```
+
+This signals the DAL router to always forward the query to the search cluster when Elasticsearch is enabled.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Products not appearing in search after update">
+    The message queue worker may be backlogged. Check worker status and increase worker concurrency:
+
+    ```bash
+    bin/console messenger:consume async --limit=500
+    ```
+  </Accordion>
+
+  <Accordion title="Index out of date after schema change">
+    Delete and rebuild the index after adding new custom fields or changing mappings:
+
+    ```bash
+    bin/console es:index
+    bin/console es:index:cleanup
+    ```
+  </Accordion>
+
+  <Accordion title="Connection errors on startup">
+    Shopware logs Elasticsearch connection errors as warnings and falls back to MySQL automatically when `SHOPWARE_ES_ENABLED=1` but the cluster is unreachable. Check `var/log/` for `elasticsearch` entries and verify `OPENSEARCH_URL` is reachable from the PHP process.
+  </Accordion>
+</AccordionGroup>

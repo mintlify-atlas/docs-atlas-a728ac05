@@ -1,80 +1,245 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Get started with Shopware"
+description: "Set up Shopware locally with Docker, start the shop, make your first Store API call, and scaffold a minimal plugin — all from a single repository."
 ---
 
-## Get started in three steps
+This guide walks you through running Shopware locally using the Docker Compose setup included in the repository, verifying the installation with a Store API request, and creating a minimal plugin. You need [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) installed before you begin.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
 
-### Step 1: Set up your local environment
+<Step title="Clone the repository">
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Clone the Shopware monorepo and navigate into it:
 
-### Step 2: Deploy your changes
+```bash
+git clone https://github.com/shopware/shopware.git
+cd shopware
+```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+</Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+<Step title="Start the Docker containers">
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+The `compose.yaml` at the repository root defines all services you need for local development: a PHP/Caddy web container, MariaDB, Adminer, Valkey, Mailpit, and OpenSearch.
 
-### Step 3: Go live
+```bash
+docker compose up -d
+```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+Docker pulls the images and starts the containers. The web container depends on the `database` service passing its health check before it starts, so the first run may take a minute or two.
+
+<Note>
+The web container uses the image `ghcr.io/shopware/docker-dev:php8.4-node24-caddy` and exposes the following ports:
+
+| Port | Service |
+|------|---------|
+| `8000` | Shopware (HTTP) |
+| `5173` | Admin watcher (Vite) |
+| `9998` | Storefront watcher |
+| `9080` | Adminer (database UI) |
+| `8025` | Mailpit (email catcher) |
+</Note>
+
+</Step>
+
+<Step title="Install dependencies and set up the database">
+
+Run the `composer setup` command inside the web container. This installs Composer and npm dependencies, creates the database schema, and compiles the admin and storefront assets:
+
+```bash
+docker compose exec web composer setup
+```
+
+This command runs the full setup sequence:
+
+1. `composer install -o` — installs PHP dependencies
+2. `bin/console system:install --drop-database --basic-setup --force --no-assign-theme` — creates the database and loads seed data
+3. npm install and build for Admin and Storefront
+4. `bin/console theme:change --sync --all Storefront` — assigns the default theme
+5. `bin/console assets:install` — publishes bundle assets
+
+<Warning>
+The setup command drops and recreates the database. Do not run it against a database that contains data you want to keep.
+</Warning>
+
+</Step>
+
+<Step title="Open Shopware in your browser">
+
+Once setup completes, open the storefront and admin panel:
+
+- **Storefront**: [http://localhost:8000](http://localhost:8000)
+- **Admin panel**: [http://localhost:8000/admin](http://localhost:8000/admin)
+  - Username: `admin`
+  - Password: `shopware`
+
+</Step>
+
+<Step title="Make your first Store API call">
+
+The Store API is available at `/store-api/`. All Store API requests require a `sw-access-key` header that identifies the Sales Channel. The basic setup creates a default Sales Channel with access key `SWSCBHKOCKBHITLMBHGQ`.
+
+Fetch the product listing from the default category:
+
+```bash
+curl -s http://localhost:8000/store-api/product \
+  -H "sw-access-key: SWSCBHKOCKBHITLMBHGQ" \
+  -H "Content-Type: application/json" \
+  -d '{}' | python3 -m json.tool
+```
+
+You can also pass criteria to filter and paginate results:
+
+```bash
+curl -s http://localhost:8000/store-api/product \
+  -H "sw-access-key: SWSCBHKOCKBHITLMBHGQ" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 5,
+    "filter": [
+      {
+        "type": "equals",
+        "field": "active",
+        "value": true
+      }
+    ],
+    "includes": {
+      "product": ["id", "name", "productNumber", "price"]
+    }
+  }' | python3 -m json.tool
+```
+
+A successful response contains a `elements` array with product objects. If you receive a `401` error, retrieve the actual access key from the admin panel under **Sales Channels → API**.
+
+<Tip>
+The Store API uses the same `Criteria` format as the Admin API and the DAL internally. The `filter`, `sort`, `limit`, `page`, `aggregations`, and `includes` fields are consistent across all Shopware APIs.
+</Tip>
+
+</Step>
+
+<Step title="Make your first Admin API call">
+
+The Admin API is available at `/api/` and requires OAuth 2.0 authentication. First, obtain a bearer token using the default admin credentials:
+
+```bash
+TOKEN=$(curl -s http://localhost:8000/api/oauth/token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "grant_type": "password",
+    "client_id": "administration",
+    "scopes": "write",
+    "username": "admin",
+    "password": "shopware"
+  }' | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+```
+
+Use the token to list products via the Admin API:
+
+```bash
+curl -s http://localhost:8000/api/product \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" | python3 -m json.tool
+```
+
+</Step>
+
+<Step title="Create a minimal plugin">
+
+Plugins live in the `custom/plugins/` directory. Create the directory structure for a plugin called `MyFirstPlugin`:
+
+```bash
+mkdir -p custom/plugins/MyFirstPlugin/src
+```
+
+Create the plugin entry point at `custom/plugins/MyFirstPlugin/src/MyFirstPlugin.php`:
+
+```php
+<?php declare(strict_types=1);
+
+namespace MyFirstPlugin;
+
+use Shopware\Core\Framework\Plugin;
+
+class MyFirstPlugin extends Plugin
+{
+}
+```
+
+Create the `composer.json` for the plugin at `custom/plugins/MyFirstPlugin/composer.json`:
+
+```json
+{
+    "name": "my/first-plugin",
+    "description": "My first Shopware plugin",
+    "type": "shopware-platform-plugin",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "MyFirstPlugin\\": "src/"
+        }
+    },
+    "extra": {
+        "shopware-plugin-class": "MyFirstPlugin\\MyFirstPlugin",
+        "label": {
+            "en-GB": "My First Plugin"
+        }
+    }
+}
+```
+
+Register the plugin with Composer and Shopware:
+
+```bash
+docker compose exec web composer require my/first-plugin:* --no-interaction
+docker compose exec web php bin/console plugin:refresh
+docker compose exec web php bin/console plugin:install --activate MyFirstPlugin
+```
+
+Verify the plugin is active:
+
+```bash
+docker compose exec web php bin/console plugin:list
+```
+
+You should see `MyFirstPlugin` with status `active` in the output.
+
+</Step>
+
+<Step title="Watch for changes during development">
+
+When working on the admin panel, start the Vite watcher for hot module replacement:
+
+```bash
+docker compose exec web composer watch:admin
+```
+
+The watched admin is available at [http://localhost:5173](http://localhost:5173).
+
+For storefront changes:
+
+```bash
+docker compose exec web composer watch:storefront
+```
+
+The watched storefront is available at [http://localhost:9998](http://localhost:9998).
+
+</Step>
+
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Architecture overview" icon="sitemap" href="/architecture/overview">
+    Understand the DAL, Sales Channels, and the event system before building further.
+  </Card>
+  <Card title="Plugins" icon="plug" href="/extensions/plugins">
+    Add services, event subscribers, and API routes to your plugin.
+  </Card>
+  <Card title="Apps" icon="puzzle-piece" href="/extensions/apps">
+    Build a cloud-compatible extension using the manifest-based App system.
+  </Card>
+  <Card title="API reference" icon="code" href="/api/overview">
+    Browse the Admin API, Store API, and Sync API endpoint documentation.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

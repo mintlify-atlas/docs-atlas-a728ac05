@@ -1,0 +1,268 @@
+---
+title: "Authenticate Shopware API requests"
+description: "Learn how to obtain and use credentials for the Admin API (OAuth 2.0) and Store API (access-key + context tokens) to authenticate every request you make."
+---
+
+Shopware uses two distinct authentication schemes depending on which API you are calling. The **Admin API** uses OAuth 2.0—you exchange credentials for a short-lived Bearer token and include it in every request. The **Store API** uses a static sales-channel access key for public requests, plus a per-session context token for operations that require a customer identity such as cart management or checkout.
+
+## Admin API authentication
+
+The Admin API accepts OAuth 2.0 tokens. Two grant types are supported: **client credentials** (for machine-to-machine integrations) and **password** (for user-level access from trusted clients). Most automated integrations should use client credentials.
+
+### Get credentials
+
+Create an integration in the Shopware Admin under **Settings → System → Integrations**. Each integration generates a `client_id` and `client_secret` pair. Store these values securely—they cannot be retrieved again after creation.
+
+### Obtain an access token
+
+<Steps>
+  <Step title="Request a token">
+    Send a `POST` to `/api/oauth/token` with your client credentials. The endpoint does not require prior authentication.
+
+    ```bash
+    curl -X POST https://shop.example.com/api/oauth/token \
+      -H "Content-Type: application/json" \
+      -d '{
+        "grant_type": "client_credentials",
+        "client_id": "YOUR_CLIENT_ID",
+        "client_secret": "YOUR_CLIENT_SECRET"
+      }'
+    ```
+  </Step>
+  <Step title="Read the token response">
+    A successful response returns the token and its lifetime in seconds.
+
+    ```json
+    {
+      "token_type": "Bearer",
+      "expires_in": 600,
+      "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciO..."
+    }
+    ```
+  </Step>
+  <Step title="Attach the token to requests">
+    Include the token in the `Authorization` header of every Admin API request.
+
+    ```bash
+    curl https://shop.example.com/api/product \
+      -H "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciO..."
+    ```
+  </Step>
+</Steps>
+
+### Password grant (user context)
+
+Use the password grant when you need to act on behalf of a specific admin user. This grant includes the `username` and `password` fields and optionally a `scope`.
+
+```bash
+curl -X POST https://shop.example.com/api/oauth/token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "grant_type": "password",
+    "client_id": "administration",
+    "username": "admin@example.com",
+    "password": "your-password",
+    "scope": "write"
+  }'
+```
+
+<Warning>
+  The password grant is intended for first-party admin tooling only. Do not use it in third-party integrations—use client credentials instead.
+</Warning>
+
+### Refresh an access token
+
+Tokens obtained via the password grant include a `refresh_token`. Use it to obtain a new access token without re-entering credentials.
+
+```bash
+curl -X POST https://shop.example.com/api/oauth/token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "grant_type": "refresh_token",
+    "client_id": "administration",
+    "refresh_token": "YOUR_REFRESH_TOKEN"
+  }'
+```
+
+<Note>
+  Tokens from the client credentials grant do **not** include a refresh token. Simply request a new token when the current one expires.
+</Note>
+
+### Token expiry
+
+| Grant type | `expires_in` | Refresh token |
+|---|---|---|
+| `client_credentials` | 600 s (10 min) | No |
+| `password` | 600 s (10 min) | Yes (1 week) |
+
+Track the `expires_in` value and request a fresh token proactively before expiry to avoid failed requests mid-workflow.
+
+---
+
+## Store API authentication
+
+The Store API uses a two-layer auth model: a **sales-channel access key** that identifies which sales channel you are targeting, plus an optional **context token** that maintains per-session state such as cart contents and logged-in customer identity.
+
+### Sales-channel access key
+
+Every request to the Store API must include the `sw-access-key` header. Find your access key in the Shopware Admin under **Sales Channels → [Your Channel] → API access → Access key**.
+
+```bash
+curl https://shop.example.com/store-api/context \
+  -H "sw-access-key: SWSCABCDEFGHIJKLMNOPQRSTUVWXYZ"
+```
+
+The access key is **not a secret**—it identifies the sales channel rather than authenticating a user. Treat it like a public API key.
+
+### Context tokens
+
+Many Store API endpoints maintain stateful sessions through a context token. When you make your first request without a token, the API returns a new `sw-context-token` in the response headers. Include this token in subsequent requests to preserve cart contents, applied promotions, and customer login state.
+
+<Steps>
+  <Step title="First request — no context token">
+    ```bash
+    curl -X POST https://shop.example.com/store-api/context \
+      -H "sw-access-key: SWSCABCDEFGHIJKLMNOPQRSTUVWXYZ" \
+      -H "Content-Type: application/json"
+    ```
+
+    The response includes a `sw-context-token` header:
+
+    ```
+    sw-context-token: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+    ```
+  </Step>
+  <Step title="Add items to cart">
+    Pass the context token in the `sw-context-token` request header to associate the cart with your session.
+
+    ```bash
+    curl -X POST https://shop.example.com/store-api/checkout/cart/line-item \
+      -H "sw-access-key: SWSCABCDEFGHIJKLMNOPQRSTUVWXYZ" \
+      -H "sw-context-token: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "items": [
+          {
+            "id": "01920d1f3b7e7b1c9e4e5f6a7b8c9d0e",
+            "type": "product",
+            "referencedId": "01920d1f3b7e7b1c9e4e5f6a7b8c9d0e",
+            "quantity": 2
+          }
+        ]
+      }'
+    ```
+  </Step>
+  <Step title="Log in a customer">
+    After login the API may return a new context token that merges the guest cart with the customer account.
+
+    ```bash
+    curl -X POST https://shop.example.com/store-api/account/login \
+      -H "sw-access-key: SWSCABCDEFGHIJKLMNOPQRSTUVWXYZ" \
+      -H "sw-context-token: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "username": "customer@example.com",
+        "password": "customer-password"
+      }'
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  Persist the context token in your client (e.g., a cookie or local storage) so that returning users keep their cart and session across page loads.
+</Tip>
+
+---
+
+## Common authentication errors
+
+<AccordionGroup>
+  <Accordion title="401 Unauthorized — missing or expired token">
+    The `Authorization` header is absent or the Bearer token has expired.
+
+    ```json
+    {
+      "errors": [
+        {
+          "status": "401",
+          "code": "FRAMEWORK__INVALID_ACCESS_TOKEN",
+          "title": "Unauthorized",
+          "detail": "The provided access token is expired."
+        }
+      ]
+    }
+    ```
+
+    **Fix:** Request a new token from `/api/oauth/token`.
+  </Accordion>
+  <Accordion title="401 Unauthorized — invalid client credentials">
+    The `client_id` or `client_secret` is incorrect.
+
+    ```json
+    {
+      "errors": [
+        {
+          "status": "401",
+          "code": "invalid_client",
+          "title": "Client authentication failed"
+        }
+      ]
+    }
+    ```
+
+    **Fix:** Verify your credentials in **Settings → System → Integrations**.
+  </Accordion>
+  <Accordion title="403 Forbidden — missing scope or ACL privilege">
+    The token was issued but the integration lacks the required ACL privilege for the requested resource.
+
+    ```json
+    {
+      "errors": [
+        {
+          "status": "403",
+          "code": "FRAMEWORK__MISSING_PRIVILEGE_ERROR",
+          "title": "Forbidden",
+          "detail": "Missing privilege: product:read"
+        }
+      ]
+    }
+    ```
+
+    **Fix:** Edit the integration in the Admin and grant the missing ACL role or privilege.
+  </Accordion>
+  <Accordion title="429 Too Many Requests — rate limit exceeded">
+    The OAuth token endpoint enforces a rate limit per username and IP address.
+
+    ```json
+    {
+      "errors": [
+        {
+          "status": "429",
+          "title": "Too Many Requests",
+          "detail": "Wait 30 seconds before retrying."
+        }
+      ]
+    }
+    ```
+
+    **Fix:** Implement exponential back-off and reuse tokens until they expire rather than requesting a new one per API call.
+  </Accordion>
+  <Accordion title="Store API — missing sw-access-key">
+    All Store API requests require the `sw-access-key` header. Omitting it returns a `401`.
+
+    **Fix:** Add `-H "sw-access-key: YOUR_KEY"` to every Store API request.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Summary
+
+<CardGroup cols={2}>
+  <Card title="Admin API" icon="key">
+    Use OAuth 2.0 client credentials. POST to `/api/oauth/token`, then set `Authorization: Bearer <token>` on every request. Tokens expire after 10 minutes.
+  </Card>
+  <Card title="Store API" icon="tag">
+    Set `sw-access-key` on every request. For stateful sessions (cart, login), capture `sw-context-token` from the response and echo it back in subsequent requests.
+  </Card>
+</CardGroup>
